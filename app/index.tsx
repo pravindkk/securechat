@@ -41,6 +41,8 @@ export default function ChatScreen() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [inputMessage, setInputMessage] = useState('');
   const [loading, setLoading] = useState(false);
+  const [unreadCounts, setUnreadCounts] = useState<Map<string, number>>(new Map());
+  const [keyExchangeInProgress, setKeyExchangeInProgress] = useState(false);
 
   const socketRef = useRef<Socket | null>(null);
   const ratchetStatesRef = useRef<Map<string, RatchetState>>(new Map());
@@ -158,8 +160,8 @@ export default function ChatScreen() {
 
         console.log('Alice state reinitialized with Bob\'s real public key');
 
-        // Force UI update by triggering a state change
-        alert(`Key exchange complete! You can now send messages to ${from}`);
+        // Clear key exchange in progress flag
+        setKeyExchangeInProgress(false);
       }
     });
 
@@ -201,15 +203,33 @@ export default function ChatScreen() {
         const existingMessages = storedMessages ? JSON.parse(storedMessages) : [];
         const updatedMessages = [...existingMessages, newMessage];
 
+        console.log(`Storing message from ${from}, total messages now: ${updatedMessages.length}`);
+        console.log(`Storage key: messages_${username}_${from}`);
+
         // Store updated messages
         await AsyncStorage.setItem(
           `messages_${username}_${from}`,
           JSON.stringify(updatedMessages)
         );
 
+        // Verify storage
+        const verification = await AsyncStorage.getItem(`messages_${username}_${from}`);
+        console.log(`Verification: stored ${verification ? JSON.parse(verification).length : 0} messages`);
+
+        console.log(`Current selected user: ${selectedUserRef.current}, message from: ${from}`);
+
         // Update UI only if currently chatting with this user
         if (selectedUserRef.current === from) {
+          console.log('Adding message to UI');
           setMessages(prev => [...prev, newMessage]);
+        } else {
+          console.log('User not viewing this chat, incrementing unread count');
+          // Increment unread count if not viewing this chat
+          setUnreadCounts(prev => {
+            const newCounts = new Map(prev);
+            newCounts.set(from, (newCounts.get(from) || 0) + 1);
+            return newCounts;
+          });
         }
       } catch (error) {
         console.error('Error decrypting message:', error);
@@ -219,6 +239,9 @@ export default function ChatScreen() {
 
   const initiateKeyExchange = async (recipient: string) => {
     try {
+      // Set key exchange in progress
+      setKeyExchangeInProgress(true);
+
       // Generate shared secret
       const { sharedSecret } = generateSharedSecret();
 
@@ -239,8 +262,18 @@ export default function ChatScreen() {
       });
 
       console.log('Key exchange initiated with:', recipient);
+
+      // Set a timeout in case Bob doesn't respond
+      setTimeout(() => {
+        // Check if key exchange completed
+        if (!keyExchangeCompleteRef.current.get(recipient)) {
+          console.log('Key exchange timeout for:', recipient);
+          setKeyExchangeInProgress(false);
+        }
+      }, 10000); // 10 second timeout
     } catch (error) {
       console.error('Error during key exchange:', error);
+      setKeyExchangeInProgress(false);
     }
   };
 
@@ -248,9 +281,19 @@ export default function ChatScreen() {
     setSelectedUser(user);
     selectedUserRef.current = user;
 
-    // Load messages from storage first (before clearing)
+    // Clear unread count for this user
+    setUnreadCounts(prev => {
+      const newCounts = new Map(prev);
+      newCounts.delete(user);
+      return newCounts;
+    });
+
+    // Load messages from storage first
+    console.log(`Loading messages for ${user}, storage key: messages_${username}_${user}`);
     const storedMessages = await AsyncStorage.getItem(`messages_${username}_${user}`);
     const loadedMessages = storedMessages ? JSON.parse(storedMessages) : [];
+    console.log(`Loading messages for ${user}:`, loadedMessages.length, 'messages');
+    console.log('Loaded messages:', loadedMessages);
     setMessages(loadedMessages);
 
     // Check if we have a ratchet state for this user
@@ -266,10 +309,18 @@ export default function ChatScreen() {
         const keyExchangeComplete = await AsyncStorage.getItem(`key_exchange_complete_${username}_${user}`);
         if (keyExchangeComplete === 'true') {
           keyExchangeCompleteRef.current.set(user, true);
+          setKeyExchangeInProgress(false); // Clear the flag if key exchange is already complete
         }
       } else {
         // Initiate key exchange
         await initiateKeyExchange(user);
+      }
+    } else {
+      // State exists, check if key exchange is complete
+      const keyExchangeComplete = await AsyncStorage.getItem(`key_exchange_complete_${username}_${user}`);
+      if (keyExchangeComplete === 'true') {
+        keyExchangeCompleteRef.current.set(user, true);
+        setKeyExchangeInProgress(false); // Clear the flag if key exchange is already complete
       }
     }
   };
@@ -377,14 +428,22 @@ export default function ChatScreen() {
         <FlatList
           data={users}
           keyExtractor={(item) => item}
-          renderItem={({ item }) => (
-            <TouchableOpacity
-              style={styles.userItem}
-              onPress={() => selectUser(item)}
-            >
-              <Text style={styles.userText}>{item}</Text>
-            </TouchableOpacity>
-          )}
+          renderItem={({ item }) => {
+            const unreadCount = unreadCounts.get(item) || 0;
+            return (
+              <TouchableOpacity
+                style={styles.userItem}
+                onPress={() => selectUser(item)}
+              >
+                <Text style={styles.userText}>{item}</Text>
+                {unreadCount > 0 && (
+                  <View style={styles.unreadBadge}>
+                    <Text style={styles.unreadBadgeText}>{unreadCount}</Text>
+                  </View>
+                )}
+              </TouchableOpacity>
+            );
+          }}
           ListEmptyComponent={
             <Text style={styles.emptyText}>No users online</Text>
           }
@@ -421,6 +480,13 @@ export default function ChatScreen() {
         </TouchableOpacity>
         <Text style={styles.headerTitle}>{selectedUser}</Text>
       </View>
+
+      {keyExchangeInProgress && (
+        <View style={styles.keyExchangeNotice}>
+          <ActivityIndicator size="small" color="#007AFF" />
+          <Text style={styles.keyExchangeText}>Establishing secure connection...</Text>
+        </View>
+      )}
 
       <FlatList
         data={messages}
@@ -503,16 +569,48 @@ const styles = StyleSheet.create({
     borderRadius: 10,
     marginBottom: 10,
     borderWidth: 1,
-    borderColor: '#ddd'
+    borderColor: '#ddd',
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center'
   },
   userText: {
     fontSize: 16,
     color: '#333'
   },
+  unreadBadge: {
+    backgroundColor: '#007AFF',
+    borderRadius: 12,
+    minWidth: 24,
+    height: 24,
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: 6
+  },
+  unreadBadgeText: {
+    color: '#fff',
+    fontSize: 12,
+    fontWeight: '700'
+  },
   emptyText: {
     textAlign: 'center',
     color: '#999',
     marginTop: 20
+  },
+  keyExchangeNotice: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#E3F2FD',
+    padding: 12,
+    marginBottom: 10,
+    borderRadius: 8
+  },
+  keyExchangeText: {
+    marginLeft: 10,
+    fontSize: 14,
+    color: '#007AFF',
+    fontWeight: '500'
   },
   header: {
     flexDirection: 'row',
