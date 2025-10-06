@@ -7,6 +7,9 @@ import { XChaCha20Poly1305 } from '@stablelib/xchacha20poly1305';
 import { encode as encodeBase64, decode as decodeBase64 } from '@stablelib/base64';
 import { encode as encodeUTF8, decode as decodeUTF8 } from '@stablelib/utf8';
 
+// Constants
+const MAX_SKIP = 1000; // Maximum number of message keys to skip
+
 // Utility function
 function concatArrayBuffers(...buffers: Uint8Array[]): Uint8Array {
   const totalLength = buffers.reduce((acc, buf) => acc + buf.length, 0);
@@ -19,19 +22,19 @@ function concatArrayBuffers(...buffers: Uint8Array[]): Uint8Array {
   return result;
 }
 
-// X25519 key generation using @stablelib/x25519
-function generateKeyPair(): { privateKey: Uint8Array; publicKey: Uint8Array } {
+// X25519 key generation
+function generateDHKeyPair(): { privateKey: Uint8Array; publicKey: Uint8Array } {
   const privateKey = randomBytes(SECRET_KEY_LENGTH);
   const publicKey = scalarMultBase(privateKey);
   return { privateKey, publicKey };
 }
 
 // Compute shared secret using X25519
-function computeSharedSecret(privateKey: Uint8Array, publicKey: Uint8Array): Uint8Array {
+function DH(privateKey: Uint8Array, publicKey: Uint8Array): Uint8Array {
   return sharedKey(privateKey, publicKey);
 }
 
-// HKDF implementation using @stablelib/hkdf
+// HKDF wrapper for general use
 function hkdf(
   inputKeyMaterial: Uint8Array,
   salt: Uint8Array,
@@ -42,29 +45,67 @@ function hkdf(
   return hkdfInstance.expand(length);
 }
 
-// KDF Chain
-function kdfChain(chainKey: Uint8Array): { messageKey: Uint8Array; nextChainKey: Uint8Array } {
-  const messageKey = hkdf(chainKey, new Uint8Array(SHARED_KEY_LENGTH), 'msg', SHARED_KEY_LENGTH);
-  const nextChainKey = hkdf(chainKey, new Uint8Array(SHARED_KEY_LENGTH), 'chain', SHARED_KEY_LENGTH);
-  return { messageKey, nextChainKey };
+// KDF_RK: Root key KDF - returns new root key and chain key
+function KDF_RK(rootKey: Uint8Array, dhOutput: Uint8Array): { rootKey: Uint8Array; chainKey: Uint8Array } {
+  // Signal spec: Use HKDF with the DH output as input key material
+  const output = hkdf(
+    dhOutput,
+    rootKey,
+    'SignalDoubleRatchet',
+    SHARED_KEY_LENGTH * 2 // 64 bytes: 32 for RK, 32 for CK
+  );
+
+  return {
+    rootKey: output.slice(0, SHARED_KEY_LENGTH),
+    chainKey: output.slice(SHARED_KEY_LENGTH, SHARED_KEY_LENGTH * 2)
+  };
 }
 
-// XChaCha20-Poly1305 encryption using @stablelib/xchacha20poly1305
-function aeadEncrypt(key: Uint8Array, plaintext: Uint8Array): { nonce: Uint8Array; ciphertext: Uint8Array } {
-  const cipher = new XChaCha20Poly1305(key);
+// KDF_CK: Chain key KDF - returns message key and next chain key
+function KDF_CK(chainKey: Uint8Array): { messageKey: Uint8Array; chainKey: Uint8Array } {
+  // Use HMAC-based KDF for symmetric ratchet
+  const messageKey = hkdf(chainKey, new Uint8Array(SHARED_KEY_LENGTH), 'MessageKey', SHARED_KEY_LENGTH);
+  const nextChainKey = hkdf(chainKey, new Uint8Array(SHARED_KEY_LENGTH), 'ChainKey', SHARED_KEY_LENGTH);
+  return { messageKey, chainKey: nextChainKey };
+}
+
+// Encrypt with AEAD including associated data
+function ENCRYPT(
+  messageKey: Uint8Array,
+  plaintext: Uint8Array,
+  associatedData: Uint8Array
+): { nonce: Uint8Array; ciphertext: Uint8Array } {
+  const cipher = new XChaCha20Poly1305(messageKey);
   const nonce = randomBytes(24); // XChaCha20-Poly1305 uses 24-byte nonces
-  const ciphertext = cipher.seal(nonce, plaintext);
+  const ciphertext = cipher.seal(nonce, plaintext, associatedData);
   return { nonce, ciphertext };
 }
 
-// XChaCha20-Poly1305 decryption using @stablelib/xchacha20poly1305
-function aeadDecrypt(key: Uint8Array, nonce: Uint8Array, ciphertext: Uint8Array): Uint8Array {
-  const cipher = new XChaCha20Poly1305(key);
-  const plaintext = cipher.open(nonce, ciphertext);
+// Decrypt with AEAD including associated data
+function DECRYPT(
+  messageKey: Uint8Array,
+  nonce: Uint8Array,
+  ciphertext: Uint8Array,
+  associatedData: Uint8Array
+): Uint8Array {
+  const cipher = new XChaCha20Poly1305(messageKey);
+  const plaintext = cipher.open(nonce, ciphertext, associatedData);
   if (plaintext === null) {
     throw new Error('Decryption failed: authentication tag mismatch');
   }
   return plaintext;
+}
+
+// Header structure
+interface MessageHeader {
+  publicKey: string; // Base64 encoded DH public key
+  pn: number; // Previous chain length
+  n: number; // Message number
+}
+
+// Encode header for use as associated data
+function encodeHeader(header: MessageHeader): Uint8Array {
+  return encodeUTF8(JSON.stringify(header));
 }
 
 // Double Ratchet State
@@ -72,30 +113,33 @@ export interface RatchetState {
   DHs: { privateKey: Uint8Array; publicKey: Uint8Array } | null; // DH sending key pair
   DHr: Uint8Array | null; // DH receiving public key
   RK: Uint8Array; // Root key
-  CKs: Uint8Array; // Sending chain key
-  CKr: Uint8Array; // Receiving chain key
+  CKs: Uint8Array | null; // Sending chain key
+  CKr: Uint8Array | null; // Receiving chain key
   Ns: number; // Message number for sending
   Nr: number; // Message number for receiving
   PN: number; // Previous chain length
   MKSKIPPED: Map<string, Uint8Array>; // Skipped message keys
 }
 
-// Initialize Alice's state (initiator)
+// Initialize Alice's state (initiator) - FIXED per Signal spec
 export function initializeAlice(sharedSecret: Uint8Array, bobPublicKey: Uint8Array): RatchetState {
-  const DHs = generateKeyPair();
-  const dh = computeSharedSecret(DHs.privateKey, bobPublicKey);
+  // Alice initializes with Bob's prekey but doesn't perform DH ratchet yet
+  // The DH ratchet happens on first message send
+  const rootKey = hkdf(sharedSecret, new Uint8Array(SHARED_KEY_LENGTH), 'SignalRoot', SHARED_KEY_LENGTH);
 
-  // Perform initial DH ratchet to derive root key and sending chain key
-  const rootKey = hkdf(sharedSecret, new Uint8Array(SHARED_KEY_LENGTH), 'root', SHARED_KEY_LENGTH);
-  const newRootKey = hkdf(concatArrayBuffers(rootKey, dh), new Uint8Array(SHARED_KEY_LENGTH), 'root', SHARED_KEY_LENGTH);
-  const sendingChainKey = hkdf(concatArrayBuffers(newRootKey, dh), new Uint8Array(SHARED_KEY_LENGTH), 'chain', SHARED_KEY_LENGTH);
+  // Generate Alice's initial DH keypair
+  const DHs = generateDHKeyPair();
+
+  // Perform first DH ratchet to get sending chain
+  const dhOutput = DH(DHs.privateKey, bobPublicKey);
+  const { rootKey: newRootKey, chainKey: sendingChainKey } = KDF_RK(rootKey, dhOutput);
 
   return {
     DHs,
     DHr: bobPublicKey,
     RK: newRootKey,
     CKs: sendingChainKey,
-    CKr: new Uint8Array(SHARED_KEY_LENGTH),
+    CKr: null, // No receiving chain yet
     Ns: 0,
     Nr: 0,
     PN: 0,
@@ -105,14 +149,14 @@ export function initializeAlice(sharedSecret: Uint8Array, bobPublicKey: Uint8Arr
 
 // Initialize Bob's state (responder)
 export function initializeBob(sharedSecret: Uint8Array, bobKeyPair: { privateKey: Uint8Array; publicKey: Uint8Array }): RatchetState {
-  const rootKey = hkdf(sharedSecret, new Uint8Array(SHARED_KEY_LENGTH), 'root', SHARED_KEY_LENGTH);
+  const rootKey = hkdf(sharedSecret, new Uint8Array(SHARED_KEY_LENGTH), 'SignalRoot', SHARED_KEY_LENGTH);
 
   return {
     DHs: bobKeyPair,
-    DHr: null,
+    DHr: null, // Bob doesn't know Alice's DH key yet
     RK: rootKey,
-    CKs: new Uint8Array(SHARED_KEY_LENGTH),
-    CKr: new Uint8Array(SHARED_KEY_LENGTH),
+    CKs: null, // No sending chain yet
+    CKr: null, // No receiving chain yet
     Ns: 0,
     Nr: 0,
     PN: 0,
@@ -120,46 +164,98 @@ export function initializeBob(sharedSecret: Uint8Array, bobKeyPair: { privateKey
   };
 }
 
-// DH Ratchet step
-function dhRatchet(state: RatchetState, receivedPublicKey: Uint8Array): void {
+// DH Ratchet step - FIXED per Signal spec
+function DHRatchet(state: RatchetState, header: MessageHeader): void {
+  const receivedPublicKey = decodeBase64(header.publicKey);
+
+  // Save previous chain length
   state.PN = state.Ns;
   state.Ns = 0;
   state.Nr = 0;
   state.DHr = receivedPublicKey;
 
-  // Perform DH with received public key to get receiving chain key
+  // Step 1: Perform DH with old sending key to derive receiving chain
+  // RK, CKr = KDF_RK(RK, DH(DHs, DHr_new))
   if (state.DHs) {
-    const dh = computeSharedSecret(state.DHs.privateKey, receivedPublicKey);
-    const newRootKey = hkdf(concatArrayBuffers(state.RK, dh), new Uint8Array(SHARED_KEY_LENGTH), 'root', SHARED_KEY_LENGTH);
-    state.CKr = hkdf(concatArrayBuffers(newRootKey, dh), new Uint8Array(SHARED_KEY_LENGTH), 'chain', SHARED_KEY_LENGTH);
+    const dhOutput = DH(state.DHs.privateKey, receivedPublicKey);
+    const { rootKey: newRootKey, chainKey: receivingChainKey } = KDF_RK(state.RK, dhOutput);
     state.RK = newRootKey;
+    state.CKr = receivingChainKey;
   }
 
-  // Generate new sending key pair
-  state.DHs = generateKeyPair();
+  // Step 2: Generate new sending key pair
+  state.DHs = generateDHKeyPair();
 
-  // Perform DH with received public key to get sending chain key
-  const dh = computeSharedSecret(state.DHs.privateKey, receivedPublicKey);
-  const newRootKey = hkdf(concatArrayBuffers(state.RK, dh), new Uint8Array(SHARED_KEY_LENGTH), 'root', SHARED_KEY_LENGTH);
-  state.CKs = hkdf(concatArrayBuffers(newRootKey, dh), new Uint8Array(SHARED_KEY_LENGTH), 'chain', SHARED_KEY_LENGTH);
-  state.RK = newRootKey;
+  // Step 3: Perform DH with new sending key to derive sending chain
+  // RK, CKs = KDF_RK(RK, DH(DHs_new, DHr_new))
+  const dhOutput = DH(state.DHs.privateKey, receivedPublicKey);
+  const { rootKey: finalRootKey, chainKey: sendingChainKey } = KDF_RK(state.RK, dhOutput);
+  state.RK = finalRootKey;
+  state.CKs = sendingChainKey;
 }
 
-// Encrypt message
+// Try to decrypt with skipped message key
+function trySkippedMessageKeys(
+  state: RatchetState,
+  header: MessageHeader,
+  nonce: Uint8Array,
+  ciphertext: Uint8Array
+): Uint8Array | null {
+  const key = `${header.publicKey}-${header.n}`;
+  const messageKey = state.MKSKIPPED.get(key);
+
+  if (messageKey) {
+    // Found skipped key, use it
+    state.MKSKIPPED.delete(key);
+    const headerBytes = encodeHeader(header);
+    return DECRYPT(messageKey, nonce, ciphertext, headerBytes);
+  }
+
+  return null;
+}
+
+// Skip message keys in current receiving chain
+function skipMessageKeys(state: RatchetState, until: number): void {
+  // If no receiving chain exists yet, nothing to skip
+  if (!state.CKr) {
+    return;
+  }
+
+  if (state.Nr + MAX_SKIP < until) {
+    throw new Error(`Too many message keys to skip: ${until - state.Nr} > ${MAX_SKIP}`);
+  }
+
+  if (state.DHr && state.CKr) {
+    while (state.Nr < until) {
+      const { messageKey, chainKey } = KDF_CK(state.CKr);
+      const key = `${encodeBase64(state.DHr)}-${state.Nr}`;
+      state.MKSKIPPED.set(key, messageKey);
+      state.CKr = chainKey;
+      state.Nr += 1;
+    }
+  }
+}
+
+// Encrypt message - with proper AD
 export function ratchetEncrypt(state: RatchetState, plaintext: string): string {
-  const { messageKey, nextChainKey } = kdfChain(state.CKs);
-  state.CKs = nextChainKey;
+  if (!state.CKs || !state.DHs) {
+    throw new Error('Cannot encrypt: sending chain not initialized');
+  }
 
-  const plaintextBytes = encodeUTF8(plaintext);
-  const { nonce, ciphertext } = aeadEncrypt(messageKey, plaintextBytes);
+  const { messageKey, chainKey } = KDF_CK(state.CKs);
+  state.CKs = chainKey;
 
-  const header = {
-    publicKey: state.DHs ? encodeBase64(state.DHs.publicKey) : '',
+  const header: MessageHeader = {
+    publicKey: encodeBase64(state.DHs.publicKey),
     pn: state.PN,
     n: state.Ns
   };
 
   state.Ns += 1;
+
+  const plaintextBytes = encodeUTF8(plaintext);
+  const headerBytes = encodeHeader(header);
+  const { nonce, ciphertext } = ENCRYPT(messageKey, plaintextBytes, headerBytes);
 
   return JSON.stringify({
     header,
@@ -168,32 +264,43 @@ export function ratchetEncrypt(state: RatchetState, plaintext: string): string {
   });
 }
 
-// Decrypt message
+// Decrypt message - FIXED with skipped message key handling
 export function ratchetDecrypt(state: RatchetState, encryptedMessage: string): string {
   const message = JSON.parse(encryptedMessage);
-  const header = message.header;
-  const receivedPublicKey = decodeBase64(header.publicKey);
-
-  // Check if we need to perform DH ratchet
-  if (state.DHr === null || encodeBase64(state.DHr) !== header.publicKey) {
-    dhRatchet(state, receivedPublicKey);
-  }
-
-  // Skip message keys if needed
-  while (state.Nr < header.n) {
-    const { messageKey, nextChainKey } = kdfChain(state.CKr);
-    state.MKSKIPPED.set(`${header.publicKey}-${state.Nr}`, messageKey);
-    state.CKr = nextChainKey;
-    state.Nr += 1;
-  }
-
-  const { messageKey, nextChainKey } = kdfChain(state.CKr);
-  state.CKr = nextChainKey;
-  state.Nr += 1;
-
+  const header: MessageHeader = message.header;
   const nonce = decodeBase64(message.nonce);
   const ciphertext = decodeBase64(message.ciphertext);
-  const plaintext = aeadDecrypt(messageKey, nonce, ciphertext);
+
+  // Check if this is a skipped message
+  const skippedPlaintext = trySkippedMessageKeys(state, header, nonce, ciphertext);
+  if (skippedPlaintext) {
+    return decodeUTF8(skippedPlaintext);
+  }
+
+  // Check if we need to perform DH ratchet (new DH key from sender)
+  const receivedPublicKey = decodeBase64(header.publicKey);
+  if (state.DHr === null || encodeBase64(state.DHr) !== header.publicKey) {
+    // Skip message keys from previous receiving chain
+    skipMessageKeys(state, header.pn);
+
+    // Perform DH ratchet
+    DHRatchet(state, header);
+  }
+
+  // Skip message keys in current receiving chain
+  skipMessageKeys(state, header.n);
+
+  // Decrypt the message
+  if (!state.CKr) {
+    throw new Error('Cannot decrypt: receiving chain not initialized');
+  }
+
+  const { messageKey, chainKey } = KDF_CK(state.CKr);
+  state.CKr = chainKey;
+  state.Nr += 1;
+
+  const headerBytes = encodeHeader(header);
+  const plaintext = DECRYPT(messageKey, nonce, ciphertext, headerBytes);
 
   return decodeUTF8(plaintext);
 }
@@ -207,8 +314,8 @@ export function serializeState(state: RatchetState): string {
     } : null,
     DHr: state.DHr ? encodeBase64(state.DHr) : null,
     RK: encodeBase64(state.RK),
-    CKs: encodeBase64(state.CKs),
-    CKr: encodeBase64(state.CKr),
+    CKs: state.CKs ? encodeBase64(state.CKs) : null,
+    CKr: state.CKr ? encodeBase64(state.CKr) : null,
     Ns: state.Ns,
     Nr: state.Nr,
     PN: state.PN,
@@ -225,8 +332,8 @@ export function deserializeState(serialized: string): RatchetState {
     } : null,
     DHr: obj.DHr ? decodeBase64(obj.DHr) : null,
     RK: decodeBase64(obj.RK),
-    CKs: decodeBase64(obj.CKs),
-    CKr: decodeBase64(obj.CKr),
+    CKs: obj.CKs ? decodeBase64(obj.CKs) : null,
+    CKr: obj.CKr ? decodeBase64(obj.CKr) : null,
     Ns: obj.Ns,
     Nr: obj.Nr,
     PN: obj.PN,
@@ -235,8 +342,9 @@ export function deserializeState(serialized: string): RatchetState {
 }
 
 // Generate initial shared secret (simplified X3DH)
+// Note: For production, implement proper X3DH with signed prekeys and one-time prekeys
 export function generateSharedSecret(): { sharedSecret: Uint8Array; keyPair: { privateKey: Uint8Array; publicKey: Uint8Array } } {
-  const keyPair = generateKeyPair();
+  const keyPair = generateDHKeyPair();
   const sharedSecret = randomBytes(SHARED_KEY_LENGTH);
 
   return { sharedSecret, keyPair };

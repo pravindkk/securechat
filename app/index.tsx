@@ -247,7 +247,11 @@ export default function ChatScreen() {
   const selectUser = async (user: string) => {
     setSelectedUser(user);
     selectedUserRef.current = user;
-    setMessages([]);
+
+    // Load messages from storage first (before clearing)
+    const storedMessages = await AsyncStorage.getItem(`messages_${username}_${user}`);
+    const loadedMessages = storedMessages ? JSON.parse(storedMessages) : [];
+    setMessages(loadedMessages);
 
     // Check if we have a ratchet state for this user
     let state = ratchetStatesRef.current.get(user);
@@ -267,12 +271,6 @@ export default function ChatScreen() {
         // Initiate key exchange
         await initiateKeyExchange(user);
       }
-    }
-
-    // Load messages from storage
-    const storedMessages = await AsyncStorage.getItem(`messages_${username}_${user}`);
-    if (storedMessages) {
-      setMessages(JSON.parse(storedMessages));
     }
   };
 
