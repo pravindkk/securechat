@@ -77,15 +77,12 @@ export default function ChatScreen() {
       setUsers(userList.filter(u => u !== username));
     });
 
-    socket.on('key-exchange', async ({ from, publicKey, sharedSecret }) => {
+    socket.on('key-exchange', async ({ from, sharedSecret }) => {
       console.log('Received key exchange from:', from);
 
-      // Bob receives Alice's DH public key and shared secret
+      // Bob receives the shared secret from Alice
       const sharedSecretBytes = new Uint8Array(
         atob(sharedSecret).split('').map(c => c.charCodeAt(0))
-      );
-      const alicePublicKey = new Uint8Array(
-        atob(publicKey).split('').map(c => c.charCodeAt(0))
       );
 
       // Bob generates his own DH key pair
@@ -93,7 +90,6 @@ export default function ChatScreen() {
 
       // Initialize Bob's ratchet state
       const state = initializeBob(sharedSecretBytes, bobKeyPair);
-      // Don't set DHr here - it will be set when the first message arrives
 
       ratchetStatesRef.current.set(from, state);
 
@@ -161,6 +157,9 @@ export default function ChatScreen() {
         );
 
         console.log('Alice state reinitialized with Bob\'s real public key');
+
+        // Force UI update by triggering a state change
+        alert(`Key exchange complete! You can now send messages to ${from}`);
       }
     });
 
@@ -220,8 +219,8 @@ export default function ChatScreen() {
 
   const initiateKeyExchange = async (recipient: string) => {
     try {
-      // Generate shared secret and Alice's key pair
-      const { sharedSecret, keyPair: aliceKeyPair } = generateSharedSecret();
+      // Generate shared secret
+      const { sharedSecret } = generateSharedSecret();
 
       // Store shared secret for later use when Bob responds
       const sharedSecretBase64 = btoa(
@@ -232,29 +231,10 @@ export default function ChatScreen() {
         sharedSecretBase64
       );
 
-      // For now, create a placeholder Bob public key (will be updated when Bob responds)
-      const placeholderBobKey = new Uint8Array(32);
-      crypto.getRandomValues(placeholderBobKey);
-
-      // Initialize Alice's state with placeholder (will be reinitialized when Bob responds)
-      const state = initializeAlice(sharedSecret, placeholderBobKey);
-
-      ratchetStatesRef.current.set(recipient, state);
-
-      // Store state (will be replaced when Bob responds)
-      await AsyncStorage.setItem(
-        `ratchet_${username}_${recipient}`,
-        serializeState(state)
-      );
-
-      // Send Alice's DH public key and shared secret to Bob
-      const publicKeyBase64 = btoa(
-        String.fromCharCode(...state.DHs!.publicKey)
-      );
-
+      // Don't initialize Alice's state yet - wait for Bob's public key
+      // Just send the shared secret to Bob
       socketRef.current?.emit('key-exchange', {
         to: recipient,
-        publicKey: publicKeyBase64,
         sharedSecret: sharedSecretBase64
       });
 
@@ -303,20 +283,29 @@ export default function ChatScreen() {
       let state = ratchetStatesRef.current.get(selectedUser);
 
       if (!state) {
+        console.log('No ratchet state found for:', selectedUser);
         alert('Please wait for key exchange to complete');
         return;
       }
 
       // Check if key exchange is complete
       const keyExchangeComplete = keyExchangeCompleteRef.current.get(selectedUser);
+      console.log('Key exchange complete status:', keyExchangeComplete);
       if (!keyExchangeComplete) {
         alert('Please wait for key exchange to complete');
         return;
       }
 
       console.log('Encrypting message:', inputMessage);
+      console.log('Ratchet state before encryption:', {
+        Ns: state.Ns,
+        Nr: state.Nr,
+        hasDHs: !!state.DHs,
+        hasDHr: !!state.DHr
+      });
+
       const encryptedMessage = ratchetEncrypt(state, inputMessage);
-      console.log('Encrypted message:', encryptedMessage);
+      console.log('Encrypted message created');
 
       // Update stored state
       await AsyncStorage.setItem(
@@ -349,7 +338,7 @@ export default function ChatScreen() {
       setInputMessage('');
     } catch (error) {
       console.error('Error sending message:', error);
-      alert('Failed to send message');
+      alert('Failed to send message: ' + error.message);
     }
   };
 
