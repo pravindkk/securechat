@@ -1,688 +1,562 @@
+// app/index.tsx
 import React, { useState, useEffect, useRef } from 'react';
 import {
-  View,
-  Text,
-  TextInput,
-  TouchableOpacity,
-  FlatList,
-  KeyboardAvoidingView,
-  Platform,
-  StyleSheet,
-  ActivityIndicator
+    View,
+    Text,
+    TextInput,
+    TouchableOpacity,
+    FlatList,
+    KeyboardAvoidingView,
+    Platform,
+    StyleSheet,
+    ActivityIndicator,
+    Alert
 } from 'react-native';
-import { io, Socket } from 'socket.io-client';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import {
-  initializeAlice,
-  initializeBob,
-  ratchetEncrypt,
-  ratchetDecrypt,
-  generateSharedSecret,
-  serializeState,
-  deserializeState,
-  RatchetState
-} from '../crypto/doubleRatchet';
+import { cryptoService } from './services/CryptoService';
+import { secureStorage } from './services/SecureStorage';
+import { SocketService, Message } from './services/SocketService';
 
-interface Message {
-  id: string;
-  from: string;
-  text: string;
-  timestamp: number;
-  isOwn: boolean;
-}
-
-const SERVER_URL = 'http://localhost:3000'; // Change this to your server URL
+const SERVER_URL = 'http://localhost:3000'; // Change for production
 
 export default function ChatScreen() {
-  const [username, setUsername] = useState('');
-  const [isLoggedIn, setIsLoggedIn] = useState(false);
-  const [users, setUsers] = useState<string[]>([]);
-  const [selectedUser, setSelectedUser] = useState<string | null>(null);
-  const [messages, setMessages] = useState<Message[]>([]);
-  const [inputMessage, setInputMessage] = useState('');
-  const [loading, setLoading] = useState(false);
-  const [unreadCounts, setUnreadCounts] = useState<Map<string, number>>(new Map());
-  const [keyExchangeInProgress, setKeyExchangeInProgress] = useState(false);
+    const [username, setUsername] = useState('');
+    const [password, setPassword] = useState('');
+    const [isLoggedIn, setIsLoggedIn] = useState(false);
+    const [users, setUsers] = useState<string[]>([]);
+    const [selectedUser, setSelectedUser] = useState<string | null>(null);
+    const [messages, setMessages] = useState<Message[]>([]);
+    const [inputMessage, setInputMessage] = useState('');
+    const [loading, setLoading] = useState(false);
+    const [unreadCounts, setUnreadCounts] = useState<Map<string, number>>(new Map());
+    const [keyExchangeInProgress, setKeyExchangeInProgress] = useState(false);
 
-  const socketRef = useRef<Socket | null>(null);
-  const ratchetStatesRef = useRef<Map<string, RatchetState>>(new Map());
-  const selectedUserRef = useRef<string | null>(null);
-  const keyExchangeCompleteRef = useRef<Map<string, boolean>>(new Map());
+    const socketServiceRef = useRef<SocketService | null>(null);
+    const selectedUserRef = useRef<string | null>(null);
+    const keyExchangeCompleteRef = useRef<Map<string, boolean>>(new Map());
+    const authTokenRef = useRef<string | null>(null);
 
-  useEffect(() => {
-    return () => {
-      if (socketRef.current) {
-        socketRef.current.disconnect();
-      }
-    };
-  }, []);
-
-  const connectToServer = async () => {
-    if (!username.trim()) {
-      alert('Please enter a username');
-      return;
-    }
-
-    setLoading(true);
-
-    const socket = io(SERVER_URL);
-    socketRef.current = socket;
-
-    socket.on('connect', () => {
-      console.log('Connected to server');
-      socket.emit('register', username);
-      setIsLoggedIn(true);
-      setLoading(false);
-    });
-
-    socket.on('users', (userList: string[]) => {
-      setUsers(userList.filter(u => u !== username));
-    });
-
-    socket.on('key-exchange', async ({ from, sharedSecret }) => {
-      console.log('Received key exchange from:', from);
-
-      // Bob receives the shared secret from Alice
-      const sharedSecretBytes = new Uint8Array(
-        atob(sharedSecret).split('').map(c => c.charCodeAt(0))
-      );
-
-      // Bob generates his own DH key pair
-      const { keyPair: bobKeyPair } = generateSharedSecret();
-
-      // Initialize Bob's ratchet state
-      const state = initializeBob(sharedSecretBytes, bobKeyPair);
-
-      ratchetStatesRef.current.set(from, state);
-
-      // Mark key exchange as complete for Bob
-      keyExchangeCompleteRef.current.set(from, true);
-
-      // Store state
-      await AsyncStorage.setItem(
-        `ratchet_${username}_${from}`,
-        serializeState(state)
-      );
-
-      // Store key exchange completion
-      await AsyncStorage.setItem(
-        `key_exchange_complete_${username}_${from}`,
-        'true'
-      );
-
-      // Send Bob's public key back to Alice
-      const bobPublicKeyBase64 = btoa(
-        String.fromCharCode(...bobKeyPair.publicKey)
-      );
-
-      socketRef.current?.emit('key-exchange-response', {
-        to: from,
-        publicKey: bobPublicKeyBase64
-      });
-
-      console.log('Sent key exchange response to:', from);
-    });
-
-    socket.on('key-exchange-response', async ({ from, publicKey }) => {
-      console.log('Received key exchange response from:', from);
-
-      const bobPublicKey = new Uint8Array(
-        atob(publicKey).split('').map(c => c.charCodeAt(0))
-      );
-
-      // Get the shared secret from storage
-      const sharedSecretKey = `shared_secret_${username}_${from}`;
-      const sharedSecretB64 = await AsyncStorage.getItem(sharedSecretKey);
-
-      if (sharedSecretB64) {
-        const sharedSecret = new Uint8Array(
-          atob(sharedSecretB64).split('').map(c => c.charCodeAt(0))
-        );
-
-        // Reinitialize Alice's state with the real Bob public key
-        const newState = initializeAlice(sharedSecret, bobPublicKey);
-        ratchetStatesRef.current.set(from, newState);
-
-        // Mark key exchange as complete for Alice
-        keyExchangeCompleteRef.current.set(from, true);
-
-        // Store updated state
-        await AsyncStorage.setItem(
-          `ratchet_${username}_${from}`,
-          serializeState(newState)
-        );
-
-        // Store key exchange completion
-        await AsyncStorage.setItem(
-          `key_exchange_complete_${username}_${from}`,
-          'true'
-        );
-
-        console.log('Alice state reinitialized with Bob\'s real public key');
-
-        // Clear key exchange in progress flag
-        setKeyExchangeInProgress(false);
-      }
-    });
-
-    socket.on('message', async ({ from, encryptedMessage, timestamp }) => {
-      try {
-        let state = ratchetStatesRef.current.get(from);
-
-        if (!state) {
-          const storedState = await AsyncStorage.getItem(`ratchet_${username}_${from}`);
-          if (storedState) {
-            state = deserializeState(storedState);
-            ratchetStatesRef.current.set(from, state);
-          } else {
-            console.error('No ratchet state found for:', from);
-            return;
-          }
-        }
-
-        console.log('Decrypting message from:', from);
-        const decryptedText = ratchetDecrypt(state, encryptedMessage);
-        console.log('Decrypted message:', decryptedText);
-
-        // Update stored state
-        await AsyncStorage.setItem(
-          `ratchet_${username}_${from}`,
-          serializeState(state)
-        );
-
-        const newMessage: Message = {
-          id: Date.now().toString(),
-          from,
-          text: decryptedText,
-          timestamp,
-          isOwn: false
+    useEffect(() => {
+        return () => {
+            socketServiceRef.current?.disconnect();
         };
+    }, []);
 
-        // Load existing messages and append new one
-        const storedMessages = await AsyncStorage.getItem(`messages_${username}_${from}`);
-        const existingMessages = storedMessages ? JSON.parse(storedMessages) : [];
-        const updatedMessages = [...existingMessages, newMessage];
-
-        console.log(`Storing message from ${from}, total messages now: ${updatedMessages.length}`);
-        console.log(`Storage key: messages_${username}_${from}`);
-
-        // Store updated messages
-        await AsyncStorage.setItem(
-          `messages_${username}_${from}`,
-          JSON.stringify(updatedMessages)
-        );
-
-        // Verify storage
-        const verification = await AsyncStorage.getItem(`messages_${username}_${from}`);
-        console.log(`Verification: stored ${verification ? JSON.parse(verification).length : 0} messages`);
-
-        console.log(`Current selected user: ${selectedUserRef.current}, message from: ${from}`);
-
-        // Update UI only if currently chatting with this user
-        if (selectedUserRef.current === from) {
-          console.log('Adding message to UI');
-          setMessages(prev => [...prev, newMessage]);
-        } else {
-          console.log('User not viewing this chat, incrementing unread count');
-          // Increment unread count if not viewing this chat
-          setUnreadCounts(prev => {
-            const newCounts = new Map(prev);
-            newCounts.set(from, (newCounts.get(from) || 0) + 1);
-            return newCounts;
-          });
+    const register = async () => {
+        if (!username.trim() || !password.trim()) {
+            Alert.alert('Error', 'Please enter username and password');
+            return;
         }
-      } catch (error) {
-        console.error('Error decrypting message:', error);
-      }
-    });
-  };
 
-  const initiateKeyExchange = async (recipient: string) => {
-    try {
-      // Set key exchange in progress
-      setKeyExchangeInProgress(true);
+        setLoading(true);
 
-      // Generate shared secret
-      const { sharedSecret } = generateSharedSecret();
+        try {
+            // Initialize crypto keys
+            await cryptoService.initializeUser();
 
-      // Store shared secret for later use when Bob responds
-      const sharedSecretBase64 = btoa(
-        String.fromCharCode(...sharedSecret)
-      );
-      await AsyncStorage.setItem(
-        `shared_secret_${username}_${recipient}`,
-        sharedSecretBase64
-      );
+            // Get pre-key bundle to send to server
+            const bundle = await cryptoService.getMyPreKeyBundle();
 
-      // Don't initialize Alice's state yet - wait for Bob's public key
-      // Just send the shared secret to Bob
-      socketRef.current?.emit('key-exchange', {
-        to: recipient,
-        sharedSecret: sharedSecretBase64
-      });
+            // Register with server
+            const response = await fetch(`${SERVER_URL}/auth/register`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    username,
+                    password,
+                    identityKey: bundle.identityKey,
+                    signedPreKey: bundle.signedPreKey,
+                    signedPreKeySignature: bundle.signedPreKeySignature,
+                    signedPreKeyId: bundle.signedPreKeyId
+                })
+            });
 
-      console.log('Key exchange initiated with:', recipient);
+            const data = await response.json();
 
-      // Set a timeout in case Bob doesn't respond
-      setTimeout(() => {
-        // Check if key exchange completed
-        if (!keyExchangeCompleteRef.current.get(recipient)) {
-          console.log('Key exchange timeout for:', recipient);
-          setKeyExchangeInProgress(false);
+            if (!response.ok) {
+                throw new Error(data.error || 'Registration failed');
+            }
+
+            Alert.alert('Success', 'Account created! Please login.');
+            setPassword('');
+        } catch (error: any) {
+            Alert.alert('Error', error.message);
+        } finally {
+            setLoading(false);
         }
-      }, 10000); // 10 second timeout
-    } catch (error) {
-      console.error('Error during key exchange:', error);
-      setKeyExchangeInProgress(false);
-    }
-  };
+    };
 
-  const selectUser = async (user: string) => {
-    setSelectedUser(user);
-    selectedUserRef.current = user;
-
-    // Clear unread count for this user
-    setUnreadCounts(prev => {
-      const newCounts = new Map(prev);
-      newCounts.delete(user);
-      return newCounts;
-    });
-
-    // Load messages from storage first
-    console.log(`Loading messages for ${user}, storage key: messages_${username}_${user}`);
-    const storedMessages = await AsyncStorage.getItem(`messages_${username}_${user}`);
-    const loadedMessages = storedMessages ? JSON.parse(storedMessages) : [];
-    console.log(`Loading messages for ${user}:`, loadedMessages.length, 'messages');
-    console.log('Loaded messages:', loadedMessages);
-    setMessages(loadedMessages);
-
-    // Check if we have a ratchet state for this user
-    let state = ratchetStatesRef.current.get(user);
-
-    if (!state) {
-      const storedState = await AsyncStorage.getItem(`ratchet_${username}_${user}`);
-      if (storedState) {
-        state = deserializeState(storedState);
-        ratchetStatesRef.current.set(user, state);
-
-        // Load key exchange completion status
-        const keyExchangeComplete = await AsyncStorage.getItem(`key_exchange_complete_${username}_${user}`);
-        if (keyExchangeComplete === 'true') {
-          keyExchangeCompleteRef.current.set(user, true);
-          setKeyExchangeInProgress(false); // Clear the flag if key exchange is already complete
+    const login = async () => {
+        if (!username.trim() || !password.trim()) {
+            Alert.alert('Error', 'Please enter username and password');
+            return;
         }
-      } else {
-        // Initiate key exchange
-        await initiateKeyExchange(user);
-      }
-    } else {
-      // State exists, check if key exchange is complete
-      const keyExchangeComplete = await AsyncStorage.getItem(`key_exchange_complete_${username}_${user}`);
-      if (keyExchangeComplete === 'true') {
-        keyExchangeCompleteRef.current.set(user, true);
-        setKeyExchangeInProgress(false); // Clear the flag if key exchange is already complete
-      }
-    }
-  };
 
-  const sendMessage = async () => {
-    if (!inputMessage.trim() || !selectedUser) return;
+        setLoading(true);
 
-    try {
-      let state = ratchetStatesRef.current.get(selectedUser);
+        try {
+            // Authenticate with server
+            const response = await fetch(`${SERVER_URL}/auth/login`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ username, password })
+            });
 
-      if (!state) {
-        console.log('No ratchet state found for:', selectedUser);
-        alert('Please wait for key exchange to complete');
-        return;
-      }
+            const data = await response.json();
 
-      // Check if key exchange is complete
-      const keyExchangeComplete = keyExchangeCompleteRef.current.get(selectedUser);
-      console.log('Key exchange complete status:', keyExchangeComplete);
-      if (!keyExchangeComplete) {
-        alert('Please wait for key exchange to complete');
-        return;
-      }
+            if (!response.ok) {
+                throw new Error(data.error || 'Login failed');
+            }
 
-      console.log('Encrypting message:', inputMessage);
-      console.log('Ratchet state before encryption:', {
-        Ns: state.Ns,
-        Nr: state.Nr,
-        hasDHs: !!state.DHs,
-        hasDHr: !!state.DHr
-      });
+            const token = data.token;
 
-      const encryptedMessage = ratchetEncrypt(state, inputMessage);
-      console.log('Encrypted message created');
+            // Store credentials
+            await secureStorage.storeUsername(username);
+            authTokenRef.current = token;
 
-      // Update stored state
-      await AsyncStorage.setItem(
-        `ratchet_${username}_${selectedUser}`,
-        serializeState(state)
-      );
+            // Initialize crypto if needed
+            await cryptoService.initializeUser();
 
-      socketRef.current?.emit('message', {
-        to: selectedUser,
-        encryptedMessage
-      });
+            // Fetch and validate our keys match the server
+            try {
+                const bundleResponse = await fetch(`${SERVER_URL}/api/prekeys/${username}`, {
+                    headers: { 'Authorization': `Bearer ${token}` }
+                });
 
-      const newMessage: Message = {
-        id: Date.now().toString(),
-        from: username,
-        text: inputMessage,
-        timestamp: Date.now(),
-        isOwn: true
-      };
+                if (bundleResponse.ok) {
+                    const serverBundle = await bundleResponse.json();
 
-      const updatedMessages = [...messages, newMessage];
-      setMessages(updatedMessages);
+                    // Validate that our local identity key matches the server
+                    const localBundle = await cryptoService.getMyPreKeyBundle();
 
-      // Store messages
-      await AsyncStorage.setItem(
-        `messages_${username}_${selectedUser}`,
-        JSON.stringify(updatedMessages)
-      );
+                    if (localBundle.identityKey !== serverBundle.identityKey) {
+                        throw new Error('Local keys do not match server. Please re-register or clear data and register again.');
+                    }
 
-      setInputMessage('');
-    } catch (error) {
-      console.error('Error sending message:', error);
-      alert('Failed to send message: ' + error.message);
-    }
-  };
+                    if (localBundle.signedPreKeyId !== serverBundle.signedPreKeyId) {
+                        console.warn('SPK ID mismatch - session establishment may fail');
+                    }
+                }
+            } catch (error: any) {
+                console.error('Key validation error:', error);
+                Alert.alert('Key Mismatch', error.message || 'Local keys do not match server. Please re-register.');
+                throw error;
+            }
 
-  if (!isLoggedIn) {
-    return (
-      <View style={styles.container}>
-        <Text style={styles.title}>SecureChat</Text>
-        <Text style={styles.subtitle}>End-to-End Encrypted Messaging</Text>
+            // Connect to socket
+            const socketService = new SocketService(SERVER_URL);
+            socketServiceRef.current = socketService;
 
-        <TextInput
-          style={styles.input}
-          placeholder="Enter your username"
-          value={username}
-          onChangeText={setUsername}
-          autoCapitalize="none"
-        />
+            await socketService.connect(username, token);
 
-        <TouchableOpacity
-          style={styles.button}
-          onPress={connectToServer}
-          disabled={loading}
-        >
-          {loading ? (
-            <ActivityIndicator color="#fff" />
-          ) : (
-            <Text style={styles.buttonText}>Connect</Text>
-          )}
-        </TouchableOpacity>
-      </View>
-    );
-  }
+            // Setup socket listeners
+            setupSocketListeners(socketService);
 
-  if (!selectedUser) {
-    return (
-      <View style={styles.container}>
-        <Text style={styles.title}>Select a User to Chat</Text>
+            setIsLoggedIn(true);
+            setPassword('');
+        } catch (error: any) {
+            Alert.alert('Error', error.message);
+        } finally {
+            setLoading(false);
+        }
+    };
 
-        <FlatList
-          data={users}
-          keyExtractor={(item) => item}
-          renderItem={({ item }) => {
-            const unreadCount = unreadCounts.get(item) || 0;
-            return (
-              <TouchableOpacity
-                style={styles.userItem}
-                onPress={() => selectUser(item)}
-              >
-                <Text style={styles.userText}>{item}</Text>
-                {unreadCount > 0 && (
-                  <View style={styles.unreadBadge}>
-                    <Text style={styles.unreadBadgeText}>{unreadCount}</Text>
-                  </View>
-                )}
-              </TouchableOpacity>
+    const setupSocketListeners = (socketService: SocketService) => {
+        socketService.onUsers((userList: string[]) => {
+            setUsers(userList.filter(u => u !== username));
+        });
+
+        socketService.onKeyExchange(async ({ from, bundle, ephemeralPublicKey }) => {
+            console.log('Received key exchange from:', from);
+            setKeyExchangeInProgress(true);
+
+            try {
+                // Verify and accept the key exchange
+                const state = await cryptoService.respondToSession(
+                    username,
+                    from,
+                    bundle.identityKey,
+                    ephemeralPublicKey
+                );
+
+                keyExchangeCompleteRef.current.set(from, true);
+                await AsyncStorage.setItem(`key_exchange_complete_${username}_${from}`, 'true');
+
+                // Send confirmation back
+                const myBundle = await cryptoService.getMyPreKeyBundle();
+                socketService.emitKeyExchangeResponse(from, { bundle: myBundle });
+
+                setKeyExchangeInProgress(false);
+                console.log('Key exchange completed with:', from);
+            } catch (error: any) {
+                console.error('Key exchange failed:', error);
+                Alert.alert('Error', 'Failed to establish secure connection');
+                setKeyExchangeInProgress(false);
+            }
+        });
+
+        socketService.onKeyExchangeResponse(async ({ from, bundle }) => {
+            console.log('Received key exchange response from:', from);
+
+            // Now mark key exchange as complete for Alice (initiator)
+            keyExchangeCompleteRef.current.set(from, true);
+            await AsyncStorage.setItem(`key_exchange_complete_${username}_${from}`, 'true');
+            setKeyExchangeInProgress(false);
+
+            console.log('Key exchange completed with:', from);
+        });
+
+        socketService.onMessage(async ({ messageId, from, encryptedMessage, timestamp }) => {
+            try {
+                console.log('Received message from:', from);
+
+                const decryptedText = await cryptoService.decryptMessage(username, from, encryptedMessage);
+
+                const newMessage: Message = {
+                    id: messageId,
+                    from,
+                    to: username,
+                    text: decryptedText,
+                    timestamp,
+                    isOwn: false
+                };
+
+                // Store message
+                const storedMessages = await AsyncStorage.getItem(`messages_${username}_${from}`);
+                const existingMessages = storedMessages ? JSON.parse(storedMessages) : [];
+                const updatedMessages = [...existingMessages, newMessage];
+                await AsyncStorage.setItem(`messages_${username}_${from}`, JSON.stringify(updatedMessages));
+
+                // Update UI
+                if (selectedUserRef.current === from) {
+                    setMessages(prev => [...prev, newMessage]);
+                } else {
+                    setUnreadCounts(prev => {
+                        const newCounts = new Map(prev);
+                        newCounts.set(from, (newCounts.get(from) || 0) + 1);
+                        return newCounts;
+                    });
+                }
+
+                // Send acknowledgment
+                socketService.emitMessageAck(messageId);
+            } catch (error: any) {
+                console.error('Error processing message:', error);
+                Alert.alert('Error', 'Failed to decrypt message');
+            }
+        });
+    };
+
+    const initiateKeyExchange = async (recipient: string) => {
+        setKeyExchangeInProgress(true);
+
+        try {
+            // Get recipient's pre-key bundle from server
+            const response = await fetch(`${SERVER_URL}/api/prekeys/${recipient}`, {
+                headers: {
+                    'Authorization': `Bearer ${authTokenRef.current}`
+                }
+            });
+
+            if (!response.ok) {
+                throw new Error('Failed to get recipient keys');
+            }
+
+            const recipientBundle = await response.json();
+
+            // Initiate session
+            const { initialMessage, ephemeralPublicKey } = await cryptoService.initiateSession(
+                username,
+                recipient,
+                recipientBundle
             );
-          }}
-          ListEmptyComponent={
-            <Text style={styles.emptyText}>No users online</Text>
-          }
-        />
 
-        <TouchableOpacity
-          style={[styles.button, { marginTop: 20 }]}
-          onPress={() => {
-            socketRef.current?.disconnect();
-            setIsLoggedIn(false);
-            setUsername('');
-            setSelectedUser(null);
-            selectedUserRef.current = null;
-          }}
+            // Send key exchange to recipient
+            const myBundle = await cryptoService.getMyPreKeyBundle();
+            socketServiceRef.current?.emitKeyExchange(recipient, {
+                bundle: myBundle,
+                ephemeralPublicKey
+            });
+
+            console.log('Key exchange initiated with:', recipient);
+            // Don't mark as complete yet - wait for Bob's response
+
+            // Set timeout
+            setTimeout(() => {
+                if (!keyExchangeCompleteRef.current.get(recipient)) {
+                    console.log('Key exchange timeout for:', recipient);
+                    setKeyExchangeInProgress(false);
+                    Alert.alert('Error', 'Connection timeout. Please try again.');
+                }
+            }, 30000);
+        } catch (error: any) {
+            console.error('Key exchange error:', error);
+            Alert.alert('Error', error.message);
+            setKeyExchangeInProgress(false);
+        }
+    };
+
+    const selectUser = async (user: string) => {
+        setSelectedUser(user);
+        selectedUserRef.current = user;
+
+        // Clear unread count
+        setUnreadCounts(prev => {
+            const newCounts = new Map(prev);
+            newCounts.delete(user);
+            return newCounts;
+        });
+
+        // Load messages
+        const storedMessages = await AsyncStorage.getItem(`messages_${username}_${user}`);
+        const loadedMessages = storedMessages ? JSON.parse(storedMessages) : [];
+        setMessages(loadedMessages);
+
+        // Check if session exists
+        const state = await secureStorage.getRatchetState(username, user);
+        const keyExchangeComplete = await AsyncStorage.getItem(`key_exchange_complete_${username}_${user}`);
+
+        if (!state && keyExchangeComplete !== 'true') {
+            await initiateKeyExchange(user);
+        } else if (state || keyExchangeComplete === 'true') {
+            // Session exists or key exchange was completed
+            keyExchangeCompleteRef.current.set(user, true);
+            setKeyExchangeInProgress(false);
+        }
+    };
+
+    const sendMessage = async () => {
+        if (!inputMessage.trim() || !selectedUser) return;
+
+        const keyExchangeComplete = keyExchangeCompleteRef.current.get(selectedUser);
+        if (!keyExchangeComplete) {
+            Alert.alert('Error', 'Please wait for secure connection to establish');
+            return;
+        }
+
+        const messageText = inputMessage; // Capture the message text before clearing
+
+        try {
+            console.log('Encrypting message...');
+            const encrypted = await cryptoService.encryptMessage(username, selectedUser, messageText);
+            console.log('Message encrypted, sending via socket...');
+
+            if (!socketServiceRef.current) {
+                throw new Error('Socket not connected');
+            }
+
+            const messageId = await socketServiceRef.current.emitMessage(selectedUser, encrypted);
+            console.log('Message sent with ID:', messageId);
+
+            const newMessage: Message = {
+                id: messageId,
+                from: username,
+                to: selectedUser,
+                text: messageText,
+                timestamp: Date.now(),
+                isOwn: true
+            };
+
+            const updatedMessages = [...messages, newMessage];
+            setMessages(updatedMessages);
+
+            // Store message
+            await AsyncStorage.setItem(
+                `messages_${username}_${selectedUser}`,
+                JSON.stringify(updatedMessages)
+            );
+
+            setInputMessage('');
+            console.log('✅ Message sent successfully and UI updated');
+        } catch (error: any) {
+            console.error('❌ Error sending message:', error);
+            console.error('Error details:', error.message, error.stack);
+            Alert.alert('Error', `Failed to send message: ${error.message}`);
+        }
+    };
+
+    const clearAllData = async () => {
+        Alert.alert(
+            'Clear All Data',
+            'This will delete all keys, messages, and sessions. Are you sure?',
+            [
+                { text: 'Cancel', style: 'cancel' },
+                {
+                    text: 'Clear',
+                    style: 'destructive',
+                    onPress: async () => {
+                        await secureStorage.clearAll();
+                        await AsyncStorage.clear();
+                        Alert.alert('Success', 'All data cleared! Please restart the app.');
+                    }
+                }
+            ]
+        );
+    };
+
+    const logout = async () => {
+        socketServiceRef.current?.disconnect();
+        setIsLoggedIn(false);
+        setUsername('');
+        setPassword('');
+        setSelectedUser(null);
+        selectedUserRef.current = null;
+        keyExchangeCompleteRef.current.clear();
+    };
+
+    if (!isLoggedIn) {
+        return (
+            <View style={styles.container}>
+                <Text style={styles.title}>SecureChat</Text>
+                <Text style={styles.subtitle}>End-to-End Encrypted Messaging</Text>
+
+                <TextInput
+                    style={styles.input}
+                    placeholder="Username"
+                    value={username}
+                    onChangeText={setUsername}
+                    autoCapitalize="none"
+                />
+
+                <TextInput
+                    style={styles.input}
+                    placeholder="Password"
+                    value={password}
+                    onChangeText={setPassword}
+                    secureTextEntry
+                    autoCapitalize="none"
+                />
+
+                <TouchableOpacity style={styles.button} onPress={login} disabled={loading}>
+                    {loading ? <ActivityIndicator color="#fff" /> : <Text style={styles.buttonText}>Login</Text>}
+                </TouchableOpacity>
+
+                <TouchableOpacity style={[styles.button, styles.secondaryButton]} onPress={register} disabled={loading}>
+                    <Text style={styles.buttonText}>Register</Text>
+                </TouchableOpacity>
+
+                <TouchableOpacity
+                    style={[styles.button, { backgroundColor: '#FF3B30', marginTop: 20 }]}
+                    onPress={clearAllData}
+                >
+                    <Text style={styles.buttonText}>Clear All Data (Dev)</Text>
+                </TouchableOpacity>
+            </View>
+        );
+    }
+
+    if (!selectedUser) {
+        return (
+            <View style={styles.container}>
+                <Text style={styles.title}>Chats</Text>
+
+                <FlatList
+                    data={users}
+                    keyExtractor={(item) => item}
+                    renderItem={({ item }) => {
+                        const unreadCount = unreadCounts.get(item) || 0;
+                        return (
+                            <TouchableOpacity style={styles.userItem} onPress={() => selectUser(item)}>
+                                <Text style={styles.userText}>{item}</Text>
+                                {unreadCount > 0 && (
+                                    <View style={styles.unreadBadge}>
+                                        <Text style={styles.unreadBadgeText}>{unreadCount}</Text>
+                                    </View>
+                                )}
+                            </TouchableOpacity>
+                        );
+                    }}
+                    ListEmptyComponent={<Text style={styles.emptyText}>No users online</Text>}
+                />
+
+                <TouchableOpacity style={[styles.button, { marginTop: 20 }]} onPress={logout}>
+                    <Text style={styles.buttonText}>Logout</Text>
+                </TouchableOpacity>
+            </View>
+        );
+    }
+
+    return (
+        <KeyboardAvoidingView
+            style={styles.container}
+            behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+            keyboardVerticalOffset={100}
         >
-          <Text style={styles.buttonText}>Disconnect</Text>
-        </TouchableOpacity>
-      </View>
+            <View style={styles.header}>
+                <TouchableOpacity onPress={() => {
+                    setSelectedUser(null);
+                    selectedUserRef.current = null;
+                }}>
+                    <Text style={styles.backButton}>← Back</Text>
+                </TouchableOpacity>
+                <Text style={styles.headerTitle}>{selectedUser}</Text>
+            </View>
+
+            {keyExchangeInProgress && (
+                <View style={styles.keyExchangeNotice}>
+                    <ActivityIndicator size="small" color="#007AFF" />
+                    <Text style={styles.keyExchangeText}>Establishing secure connection...</Text>
+                </View>
+            )}
+
+            <FlatList
+                data={messages}
+                keyExtractor={(item) => item.id}
+                renderItem={({ item }) => (
+                    <View style={[styles.messageContainer, item.isOwn ? styles.ownMessage : styles.otherMessage]}>
+                        <Text style={[styles.messageText, item.isOwn && styles.ownMessageText]}>{item.text}</Text>
+                        <Text style={[styles.timestamp, item.isOwn && styles.ownTimestamp]}>
+                            {new Date(item.timestamp).toLocaleTimeString()}
+                        </Text>
+                    </View>
+                )}
+                contentContainerStyle={styles.messagesList}
+            />
+
+            <View style={styles.inputContainer}>
+                <TextInput
+                    style={styles.messageInput}
+                    placeholder="Type a message..."
+                    value={inputMessage}
+                    onChangeText={setInputMessage}
+                    multiline
+                />
+                <TouchableOpacity style={styles.sendButton} onPress={sendMessage}>
+                    <Text style={styles.sendButtonText}>Send</Text>
+                </TouchableOpacity>
+            </View>
+        </KeyboardAvoidingView>
     );
-  }
-
-  return (
-    <KeyboardAvoidingView
-      style={styles.container}
-      behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-      keyboardVerticalOffset={100}
-    >
-      <View style={styles.header}>
-        <TouchableOpacity onPress={() => {
-          setSelectedUser(null);
-          selectedUserRef.current = null;
-        }}>
-          <Text style={styles.backButton}>← Back</Text>
-        </TouchableOpacity>
-        <Text style={styles.headerTitle}>{selectedUser}</Text>
-      </View>
-
-      {keyExchangeInProgress && (
-        <View style={styles.keyExchangeNotice}>
-          <ActivityIndicator size="small" color="#007AFF" />
-          <Text style={styles.keyExchangeText}>Establishing secure connection...</Text>
-        </View>
-      )}
-
-      <FlatList
-        data={messages}
-        keyExtractor={(item) => item.id}
-        renderItem={({ item }) => (
-          <View
-            style={[
-              styles.messageContainer,
-              item.isOwn ? styles.ownMessage : styles.otherMessage
-            ]}
-          >
-            <Text style={styles.messageText}>{item.text}</Text>
-            <Text style={styles.timestamp}>
-              {new Date(item.timestamp).toLocaleTimeString()}
-            </Text>
-          </View>
-        )}
-        contentContainerStyle={styles.messagesList}
-      />
-
-      <View style={styles.inputContainer}>
-        <TextInput
-          style={styles.messageInput}
-          placeholder="Type a message..."
-          value={inputMessage}
-          onChangeText={setInputMessage}
-          multiline
-        />
-        <TouchableOpacity style={styles.sendButton} onPress={sendMessage}>
-          <Text style={styles.sendButtonText}>Send</Text>
-        </TouchableOpacity>
-      </View>
-    </KeyboardAvoidingView>
-  );
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#f5f5f5',
-    padding: 20
-  },
-  title: {
-    fontSize: 28,
-    fontWeight: 'bold',
-    textAlign: 'center',
-    marginTop: 60,
-    marginBottom: 10,
-    color: '#333'
-  },
-  subtitle: {
-    fontSize: 14,
-    textAlign: 'center',
-    marginBottom: 40,
-    color: '#666'
-  },
-  input: {
-    backgroundColor: '#fff',
-    padding: 15,
-    borderRadius: 10,
-    marginBottom: 20,
-    fontSize: 16,
-    borderWidth: 1,
-    borderColor: '#ddd'
-  },
-  button: {
-    backgroundColor: '#007AFF',
-    padding: 15,
-    borderRadius: 10,
-    alignItems: 'center'
-  },
-  buttonText: {
-    color: '#fff',
-    fontSize: 16,
-    fontWeight: '600'
-  },
-  userItem: {
-    backgroundColor: '#fff',
-    padding: 15,
-    borderRadius: 10,
-    marginBottom: 10,
-    borderWidth: 1,
-    borderColor: '#ddd',
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center'
-  },
-  userText: {
-    fontSize: 16,
-    color: '#333'
-  },
-  unreadBadge: {
-    backgroundColor: '#007AFF',
-    borderRadius: 12,
-    minWidth: 24,
-    height: 24,
-    justifyContent: 'center',
-    alignItems: 'center',
-    paddingHorizontal: 6
-  },
-  unreadBadgeText: {
-    color: '#fff',
-    fontSize: 12,
-    fontWeight: '700'
-  },
-  emptyText: {
-    textAlign: 'center',
-    color: '#999',
-    marginTop: 20
-  },
-  keyExchangeNotice: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: '#E3F2FD',
-    padding: 12,
-    marginBottom: 10,
-    borderRadius: 8
-  },
-  keyExchangeText: {
-    marginLeft: 10,
-    fontSize: 14,
-    color: '#007AFF',
-    fontWeight: '500'
-  },
-  header: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingVertical: 10,
-    borderBottomWidth: 1,
-    borderBottomColor: '#ddd',
-    marginBottom: 10
-  },
-  backButton: {
-    fontSize: 16,
-    color: '#007AFF',
-    marginRight: 15
-  },
-  headerTitle: {
-    fontSize: 18,
-    fontWeight: '600',
-    color: '#333'
-  },
-  messagesList: {
-    paddingVertical: 10
-  },
-  messageContainer: {
-    maxWidth: '80%',
-    padding: 12,
-    borderRadius: 15,
-    marginBottom: 10
-  },
-  ownMessage: {
-    alignSelf: 'flex-end',
-    backgroundColor: '#007AFF'
-  },
-  otherMessage: {
-    alignSelf: 'flex-start',
-    backgroundColor: '#fff',
-    borderWidth: 1,
-    borderColor: '#ddd'
-  },
-  messageText: {
-    fontSize: 16,
-    color: '#333'
-  },
-  timestamp: {
-    fontSize: 10,
-    color: '#999',
-    marginTop: 4
-  },
-  inputContainer: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingTop: 10,
-    borderTopWidth: 1,
-    borderTopColor: '#ddd'
-  },
-  messageInput: {
-    flex: 1,
-    backgroundColor: '#fff',
-    padding: 12,
-    borderRadius: 20,
-    marginRight: 10,
-    maxHeight: 100,
-    borderWidth: 1,
-    borderColor: '#ddd'
-  },
-  sendButton: {
-    backgroundColor: '#007AFF',
-    paddingHorizontal: 20,
-    paddingVertical: 12,
-    borderRadius: 20
-  },
-  sendButtonText: {
-    color: '#fff',
-    fontWeight: '600'
-  }
+    container: { flex: 1, backgroundColor: '#f5f5f5', padding: 20 },
+    title: { fontSize: 28, fontWeight: 'bold', textAlign: 'center', marginTop: 60, marginBottom: 10, color: '#333' },
+    subtitle: { fontSize: 14, textAlign: 'center', marginBottom: 40, color: '#666' },
+    input: { backgroundColor: '#fff', padding: 15, borderRadius: 10, marginBottom: 20, fontSize: 16, borderWidth: 1, borderColor: '#ddd' },
+    button: { backgroundColor: '#007AFF', padding: 15, borderRadius: 10, alignItems: 'center' },
+    secondaryButton: { backgroundColor: '#5AC8FA', marginTop: 10 },
+    buttonText: { color: '#fff', fontSize: 16, fontWeight: '600' },
+    userItem: { backgroundColor: '#fff', padding: 15, borderRadius: 10, marginBottom: 10, borderWidth: 1, borderColor: '#ddd', flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
+    userText: { fontSize: 16, color: '#333' },
+    unreadBadge: { backgroundColor: '#007AFF', borderRadius: 12, minWidth: 24, height: 24, justifyContent: 'center', alignItems: 'center', paddingHorizontal: 6 },
+    unreadBadgeText: { color: '#fff', fontSize: 12, fontWeight: '700' },
+    emptyText: { textAlign: 'center', color: '#999', marginTop: 20 },
+    keyExchangeNotice: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', backgroundColor: '#E3F2FD', padding: 12, marginBottom: 10, borderRadius: 8 },
+    keyExchangeText: { marginLeft: 10, fontSize: 14, color: '#007AFF', fontWeight: '500' },
+    header: { flexDirection: 'row', alignItems: 'center', paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: '#ddd', marginBottom: 10 },
+    backButton: { fontSize: 16, color: '#007AFF', marginRight: 15 },
+    headerTitle: { fontSize: 18, fontWeight: '600', color: '#333' },
+    messagesList: { paddingVertical: 10 },
+    messageContainer: { maxWidth: '80%', padding: 12, borderRadius: 15, marginBottom: 10 },
+    ownMessage: { alignSelf: 'flex-end', backgroundColor: '#007AFF' },
+    otherMessage: { alignSelf: 'flex-start', backgroundColor: '#fff', borderWidth: 1, borderColor: '#ddd' },
+    messageText: { fontSize: 16, color: '#333' },
+    ownMessageText: { color: '#fff' },
+    timestamp: { fontSize: 10, color: '#999', marginTop: 4 },
+    ownTimestamp: { color: '#E3F2FD' },
+    inputContainer: { flexDirection: 'row', alignItems: 'center', paddingTop: 10, borderTopWidth: 1, borderTopColor: '#ddd' },
+    messageInput: { flex: 1, backgroundColor: '#fff', padding: 12, borderRadius: 20, marginRight: 10, maxHeight: 100, borderWidth: 1, borderColor: '#ddd' },
+    sendButton: { backgroundColor: '#007AFF', paddingHorizontal: 20, paddingVertical: 12, borderRadius: 20 },
+    sendButtonText: { color: '#fff', fontWeight: '600' }
 });
