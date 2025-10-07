@@ -335,6 +335,21 @@ export default function ChatScreen() {
         }
 
         const messageText = inputMessage; // Capture the message text before clearing
+        const tempMessageId = Date.now().toString(); // Temporary ID
+
+        // Optimistic UI update - show message immediately with "sending" status
+        const optimisticMessage: Message = {
+            id: tempMessageId,
+            from: username,
+            to: selectedUser,
+            text: messageText,
+            timestamp: Date.now(),
+            isOwn: true,
+            status: 'sending'
+        };
+
+        setMessages(prev => [...prev, optimisticMessage]);
+        setInputMessage(''); // Clear input immediately
 
         try {
             console.log('Encrypting message...');
@@ -348,29 +363,44 @@ export default function ChatScreen() {
             const messageId = await socketServiceRef.current.emitMessage(selectedUser, encrypted);
             console.log('Message sent with ID:', messageId);
 
-            const newMessage: Message = {
+            // Update message with real ID and "sent" status
+            const sentMessage: Message = {
                 id: messageId,
                 from: username,
                 to: selectedUser,
                 text: messageText,
-                timestamp: Date.now(),
-                isOwn: true
+                timestamp: optimisticMessage.timestamp,
+                isOwn: true,
+                status: 'sent'
             };
 
-            const updatedMessages = [...messages, newMessage];
-            setMessages(updatedMessages);
+            setMessages(prev =>
+                prev.map(msg => msg.id === tempMessageId ? sentMessage : msg)
+            );
 
             // Store message
+            const storedMessages = await AsyncStorage.getItem(`messages_${username}_${selectedUser}`);
+            const existingMessages = storedMessages ? JSON.parse(storedMessages) : [];
+            const updatedMessages = [...existingMessages, sentMessage];
             await AsyncStorage.setItem(
                 `messages_${username}_${selectedUser}`,
                 JSON.stringify(updatedMessages)
             );
 
-            setInputMessage('');
             console.log('✅ Message sent successfully and UI updated');
         } catch (error: any) {
             console.error('❌ Error sending message:', error);
             console.error('Error details:', error.message, error.stack);
+
+            // Update message status to "failed"
+            setMessages(prev =>
+                prev.map(msg =>
+                    msg.id === tempMessageId
+                        ? { ...msg, status: 'failed' as const }
+                        : msg
+                )
+            );
+
             Alert.alert('Error', `Failed to send message: ${error.message}`);
         }
     };
@@ -505,9 +535,19 @@ export default function ChatScreen() {
                 renderItem={({ item }) => (
                     <View style={[styles.messageContainer, item.isOwn ? styles.ownMessage : styles.otherMessage]}>
                         <Text style={[styles.messageText, item.isOwn && styles.ownMessageText]}>{item.text}</Text>
-                        <Text style={[styles.timestamp, item.isOwn && styles.ownTimestamp]}>
-                            {new Date(item.timestamp).toLocaleTimeString()}
-                        </Text>
+                        <View style={styles.messageFooter}>
+                            <Text style={[styles.timestamp, item.isOwn && styles.ownTimestamp]}>
+                                {new Date(item.timestamp).toLocaleTimeString()}
+                            </Text>
+                            {item.isOwn && item.status && (
+                                <Text style={[styles.statusIndicator, item.isOwn && styles.ownTimestamp]}>
+                                    {item.status === 'sending' && ' ⏳'}
+                                    {item.status === 'sent' && ' ✓'}
+                                    {item.status === 'delivered' && ' ✓✓'}
+                                    {item.status === 'failed' && ' ✗'}
+                                </Text>
+                            )}
+                        </View>
                     </View>
                 )}
                 contentContainerStyle={styles.messagesList}
@@ -553,8 +593,10 @@ const styles = StyleSheet.create({
     otherMessage: { alignSelf: 'flex-start', backgroundColor: '#fff', borderWidth: 1, borderColor: '#ddd' },
     messageText: { fontSize: 16, color: '#333' },
     ownMessageText: { color: '#fff' },
-    timestamp: { fontSize: 10, color: '#999', marginTop: 4 },
+    messageFooter: { flexDirection: 'row', alignItems: 'center', marginTop: 4 },
+    timestamp: { fontSize: 10, color: '#999' },
     ownTimestamp: { color: '#E3F2FD' },
+    statusIndicator: { fontSize: 10, marginLeft: 4 },
     inputContainer: { flexDirection: 'row', alignItems: 'center', paddingTop: 10, borderTopWidth: 1, borderTopColor: '#ddd' },
     messageInput: { flex: 1, backgroundColor: '#fff', padding: 12, borderRadius: 20, marginRight: 10, maxHeight: 100, borderWidth: 1, borderColor: '#ddd' },
     sendButton: { backgroundColor: '#007AFF', paddingHorizontal: 20, paddingVertical: 12, borderRadius: 20 },

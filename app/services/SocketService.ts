@@ -8,6 +8,7 @@ export interface Message {
     text: string;
     timestamp: number;
     isOwn: boolean;
+    status?: 'sending' | 'sent' | 'delivered' | 'failed';
 }
 
 export class SocketService {

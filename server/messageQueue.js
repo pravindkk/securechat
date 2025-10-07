@@ -16,12 +16,18 @@ class MessageQueue {
     }
 
     async queueMessage(messageId, from, to, encryptedMessage) {
+        // Store in database first
         await database.storeMessage(messageId, from, to, encryptedMessage);
 
+        // Attempt delivery without blocking the sender's acknowledgment
         const recipientSocketId = this.users.get(to);
         if (recipientSocketId) {
-            await this.deliverMessage(messageId, from, to, encryptedMessage, recipientSocketId);
+            // Fire and forget - don't await
+            this.deliverMessage(messageId, from, to, encryptedMessage, recipientSocketId).catch(err => {
+                console.error(`Failed to deliver message ${messageId}:`, err);
+            });
         }
+        // Sender gets immediate ack that message is queued
     }
 
     async deliverMessage(messageId, from, to, encryptedMessage, socketId) {
