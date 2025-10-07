@@ -61,7 +61,7 @@ Then restart the server (it will recreate tables).
 
 After fixing, you should see matching values in logs:
 ```
-Alice X3DH] Alice Identity X25519: <value>
+[Alice X3DH] Alice Identity X25519: <value>
 [Bob X3DH] Alice Identity X25519: <same value>
 
 [Alice X3DH] Bob Identity X25519: <value>

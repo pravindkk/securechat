@@ -57,7 +57,7 @@ export class CryptoService {
         username: string,
         recipient: string,
         recipientBundle: PreKeyBundle
-    ): Promise<{ initialMessage: string; ephemeralPublicKey: string }> {
+    ): Promise<{ ephemeralPublicKey: string }> {
         console.log('🔑 [Alice] Initiating session with', recipient);
 
         const identityKey = await secureStorage.getIdentityKey();
@@ -91,13 +91,11 @@ export class CryptoService {
 
         console.log('🔑 [Alice] Initializing ratchet state...');
         const aliceState = initializeAlice(sharedSecret, recipientSignedPreKey);
-        const initialMessage = ratchetEncrypt(aliceState, 'INIT');
 
         await secureStorage.storeRatchetState(username, recipient, aliceState);
         console.log('🔑 [Alice] Session initialized, state stored');
 
         return {
-            initialMessage,
             ephemeralPublicKey: encodeBase64(ephemeralKeyPair.publicKey)
         };
     }

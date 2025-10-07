@@ -265,7 +265,7 @@ export default function ChatScreen() {
             const recipientBundle = await response.json();
 
             // Initiate session
-            const { initialMessage, ephemeralPublicKey } = await cryptoService.initiateSession(
+            const { ephemeralPublicKey } = await cryptoService.initiateSession(
                 username,
                 recipient,
                 recipientBundle
