@@ -13,19 +13,23 @@ import {
   Snackbar,
   Alert,
 } from '@mui/material';
-import { 
-  Send, 
-  ArrowBack, 
-  Circle, 
-  Lock, 
+import {
+  Send,
+  ArrowBack,
+  Circle,
+  Lock,
   Image as ImageIcon,
   Close,
+  Group,
+  Info,
 } from '@mui/icons-material';
 import { useAuth } from '../../contexts/AuthContext';
 import { useChat } from '../../contexts/ChatContext';
 import { Room, Message } from '../../types';
 import { socketService } from '../../services/socket';
 import { api } from '../../services/api';
+import SystemMessage from './SystemMessage';
+import GroupInfoPanel from './GroupInfoPanel';
 
 interface ChatWindowProps {
   room: Room;
@@ -45,6 +49,7 @@ const ChatWindow: React.FC<ChatWindowProps> = ({ room, onBack, isMobile }) => {
   const [uploadProgress, setUploadProgress] = useState('');
   const [previewImage, setPreviewImage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [groupInfoOpen, setGroupInfoOpen] = useState(false);
   
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
@@ -52,7 +57,8 @@ const ChatWindow: React.FC<ChatWindowProps> = ({ room, onBack, isMobile }) => {
   const typingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const [isTyping, setIsTyping] = useState(false);
 
-  const otherUser = room.isPrivate
+  const isGroup = room.members.length > 2 || (!room.isPrivate && room.name);
+  const otherUser = !isGroup
     ? room.members.find((m) => m.id !== user?.id)
     : null;
 
@@ -235,7 +241,7 @@ const ChatWindow: React.FC<ChatWindowProps> = ({ room, onBack, isMobile }) => {
   const roomTypingUsers = roomTypingMap ? Array.from(roomTypingMap.values()) : [];
 
   // Render message content based on type
-  const renderMessageContent = (message: Message, isOwn: boolean) => {
+  const renderMessageContent = (message: Message, _isOwn: boolean) => {
     if (message.type === 'image' && message.mediaUrl) {
       return (
         <Box>
@@ -310,18 +316,26 @@ const ChatWindow: React.FC<ChatWindowProps> = ({ room, onBack, isMobile }) => {
         )}
         
         <Avatar
-          src={otherUser?.photoUrl || undefined}
-          sx={{ width: 45, height: 45 }}
+          src={isGroup ? (room.photoUrl || undefined) : (otherUser?.photoUrl || undefined)}
+          sx={{ width: 45, height: 45, bgcolor: isGroup ? 'primary.main' : undefined }}
         >
-          {(otherUser?.name || room.name || '?')[0]?.toUpperCase()}
+          {isGroup ? (
+            <Group />
+          ) : (
+            (otherUser?.name || room.name || '?')[0]?.toUpperCase()
+          )}
         </Avatar>
-        
+
         <Box sx={{ flex: 1 }}>
           <Typography variant="subtitle1" fontWeight="medium">
-            {otherUser?.name || otherUser?.email || room.name || 'Chat'}
+            {isGroup ? room.name : (otherUser?.name || otherUser?.email || 'Chat')}
           </Typography>
           <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
-            {otherUser && (
+            {isGroup ? (
+              <Typography variant="caption" color="text.secondary">
+                {room.members.length} members
+              </Typography>
+            ) : otherUser ? (
               <>
                 <Circle
                   sx={{
@@ -333,15 +347,22 @@ const ChatWindow: React.FC<ChatWindowProps> = ({ room, onBack, isMobile }) => {
                   {otherUser.state === 'online' ? 'Online' : 'Offline'}
                 </Typography>
               </>
-            )}
+            ) : null}
           </Box>
         </Box>
 
-        <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
-          <Lock sx={{ fontSize: 16, color: 'success.main' }} />
-          <Typography variant="caption" color="success.main">
-            E2E Encrypted
-          </Typography>
+        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
+            <Lock sx={{ fontSize: 16, color: 'success.main' }} />
+            <Typography variant="caption" color="success.main">
+              E2E Encrypted
+            </Typography>
+          </Box>
+          {isGroup && (
+            <IconButton onClick={() => setGroupInfoOpen(true)} size="small">
+              <Info />
+            </IconButton>
+          )}
         </Box>
       </Box>
 
@@ -380,6 +401,7 @@ const ChatWindow: React.FC<ChatWindowProps> = ({ room, onBack, isMobile }) => {
             {messages.map((message, index) => {
               const isOwn = message.senderId === user?.id;
               const showDateDivider = shouldShowDateDivider(message, index);
+              const isSystemMessage = message.type === 'system';
 
               return (
                 <React.Fragment key={message._id}>
@@ -398,40 +420,44 @@ const ChatWindow: React.FC<ChatWindowProps> = ({ room, onBack, isMobile }) => {
                       </Typography>
                     </Box>
                   )}
-                  
-                  <Box
-                    sx={{
-                      display: 'flex',
-                      justifyContent: isOwn ? 'flex-end' : 'flex-start',
-                      mb: 0.5,
-                    }}
-                  >
-                    <Paper
-                      elevation={0}
+
+                  {isSystemMessage ? (
+                    <SystemMessage message={message} currentUserId={user?.id} />
+                  ) : (
+                    <Box
                       sx={{
-                        p: 1.5,
-                        maxWidth: '70%',
-                        bgcolor: isOwn ? 'primary.main' : 'background.paper',
-                        color: isOwn ? 'white' : 'text.primary',
-                        borderRadius: 2,
-                        borderTopRightRadius: isOwn ? 0 : 2,
-                        borderTopLeftRadius: isOwn ? 2 : 0,
+                        display: 'flex',
+                        justifyContent: isOwn ? 'flex-end' : 'flex-start',
+                        mb: 0.5,
                       }}
                     >
-                      {renderMessageContent(message, isOwn)}
-                      <Typography
-                        variant="caption"
+                      <Paper
+                        elevation={0}
                         sx={{
-                          display: 'block',
-                          textAlign: 'right',
-                          mt: 0.5,
-                          opacity: 0.7,
+                          p: 1.5,
+                          maxWidth: '70%',
+                          bgcolor: isOwn ? 'primary.main' : 'background.paper',
+                          color: isOwn ? 'white' : 'text.primary',
+                          borderRadius: 2,
+                          borderTopRightRadius: isOwn ? 0 : 2,
+                          borderTopLeftRadius: isOwn ? 2 : 0,
                         }}
                       >
-                        {formatMessageTime(message.timestamp)}
-                      </Typography>
-                    </Paper>
-                  </Box>
+                        {renderMessageContent(message, isOwn)}
+                        <Typography
+                          variant="caption"
+                          sx={{
+                            display: 'block',
+                            textAlign: 'right',
+                            mt: 0.5,
+                            opacity: 0.7,
+                          }}
+                        >
+                          {formatMessageTime(message.timestamp)}
+                        </Typography>
+                      </Paper>
+                    </Box>
+                  )}
                 </React.Fragment>
               );
             })}
@@ -576,6 +602,15 @@ const ChatWindow: React.FC<ChatWindowProps> = ({ room, onBack, isMobile }) => {
           {error}
         </Alert>
       </Snackbar>
+
+      {/* Group Info Panel */}
+      {isGroup && (
+        <GroupInfoPanel
+          open={groupInfoOpen}
+          onClose={() => setGroupInfoOpen(false)}
+          room={room}
+        />
+      )}
     </Box>
   );
 };

@@ -93,16 +93,20 @@ model Room {
   isPrivate Boolean  @default(true) @map("is_private")
   photoUrl  String?  @map("photo_url")
   createdBy String   @map("created_by")
-  
+
   // Room encryption key (encrypted for each member)
   roomKeyVersion Int @default(1) @map("room_key_version")
-  
+
+  // Group settings
+  maxMembers Int @default(30) @map("max_members")
+
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 
-  creator    User         @relation("RoomCreator", fields: [createdBy], references: [id])
+  creator    User             @relation("RoomCreator", fields: [createdBy], references: [id])
   members    RoomMember[]
   userChats  UserChat[]
+  keyHistory RoomKeyHistory[]
 
   @@map("rooms")
 }
@@ -111,13 +115,14 @@ model RoomMember {
   id          String    @id @default(uuid())
   roomId      String    @map("room_id")
   userId      String    @map("user_id")
-  role        String    @default("member")
-  
+  role        String    @default("member") // "admin" | "member"
+
   // Encrypted room key for this user (encrypted with user's public key)
   encryptedRoomKey String @map("encrypted_room_key")
   keyVersion       Int    @default(1) @map("key_version")
-  
+
   joinedAt    DateTime  @default(now()) @map("joined_at")
+  addedBy     String?   @map("added_by") // Who added this member (null for creator)
   lastReadAt  DateTime? @map("last_read_at")
   unreadCount Int       @default(0) @map("unread_count")
 
@@ -126,6 +131,35 @@ model RoomMember {
 
   @@unique([roomId, userId])
   @@map("room_members")
+}
+
+// Key rotation history - stores historical room keys for decrypting old messages
+model RoomKeyHistory {
+  id        String   @id @default(uuid())
+  roomId    String   @map("room_id")
+  version   Int
+  createdAt DateTime @default(now()) @map("created_at")
+
+  room       Room                   @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  memberKeys RoomMemberKeyHistory[]
+
+  @@unique([roomId, version])
+  @@index([roomId])
+  @@map("room_key_history")
+}
+
+// Stores encrypted room keys for each member at each key version
+model RoomMemberKeyHistory {
+  id               String @id @default(uuid())
+  roomKeyHistoryId String @map("room_key_history_id")
+  userId           String @map("user_id")
+  encryptedRoomKey String @map("encrypted_room_key")
+
+  roomKeyHistory RoomKeyHistory @relation(fields: [roomKeyHistoryId], references: [id], onDelete: Cascade)
+
+  @@unique([roomKeyHistoryId, userId])
+  @@index([userId])
+  @@map("room_member_key_history")
 }
 
 model UserChat {

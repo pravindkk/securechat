@@ -200,7 +200,7 @@ export class AuthService {
         throw new UnauthorizedError('User not found');
       }
 
-      // Verify session exists
+      // Verify session exists and is not expired
       const tokenHash = hashString(refreshToken);
       const session = await prisma.session.findFirst({
         where: {
@@ -211,6 +211,13 @@ export class AuthService {
 
       if (!session) {
         throw new UnauthorizedError('Invalid session');
+      }
+
+      // Check if session has expired
+      if (session.expiresAt < new Date()) {
+        // Delete the expired session
+        await prisma.session.delete({ where: { id: session.id } });
+        throw new UnauthorizedError('Session expired');
       }
 
       // Generate new tokens WITHOUT creating a new session
@@ -238,9 +245,9 @@ export class AuthService {
   }
 
   /**
-   * Logout user
+   * Logout user - deletes only the specific session identified by refreshToken
    */
-  async logout(userId: string, refreshToken?: string): Promise<void> {
+  async logout(userId: string, refreshToken: string): Promise<void> {
     await prisma.user.update({
       where: { id: userId },
       data: {
@@ -249,16 +256,10 @@ export class AuthService {
       },
     });
 
-    if (refreshToken) {
-      const tokenHash = hashString(refreshToken);
-      await prisma.session.deleteMany({
-        where: { userId, tokenHash },
-      });
-    } else {
-      await prisma.session.deleteMany({
-        where: { userId },
-      });
-    }
+    const tokenHash = hashString(refreshToken);
+    await prisma.session.deleteMany({
+      where: { userId, tokenHash },
+    });
 
     logger.info(`User logged out: ${userId}`);
   }

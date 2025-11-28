@@ -16,11 +16,12 @@ import {
   CircularProgress,
   Fab,
 } from '@mui/material';
-import { Search, MoreVert, Logout, Add, Circle, Devices } from '@mui/icons-material';
+import { Search, MoreVert, Logout, Add, Circle, Devices, Group, PersonAdd, GroupAdd } from '@mui/icons-material';
 import { useAuth } from '../../contexts/AuthContext';
 import { useChat } from '../../contexts/ChatContext';
 import { Chat, Room } from '../../types';
 import NewChatDialog from './NewChatDialog';
+import NewGroupDialog from './NewGroupDialog';
 
 interface SidebarProps {
   onSelectChat: (room: Room) => void;
@@ -32,7 +33,9 @@ const Sidebar: React.FC<SidebarProps> = ({ onSelectChat, selectedRoomId }) => {
   const { chats, isLoadingChats } = useChat();
   const [searchQuery, setSearchQuery] = useState('');
   const [anchorEl, setAnchorEl] = useState<null | HTMLElement>(null);
+  const [fabAnchorEl, setFabAnchorEl] = useState<null | HTMLElement>(null);
   const [newChatOpen, setNewChatOpen] = useState(false);
+  const [newGroupOpen, setNewGroupOpen] = useState(false);
 
   const filteredChats = chats.filter((chat) => {
     const name = chat.isPrivate && chat.otherUser
@@ -73,6 +76,28 @@ const Sidebar: React.FC<SidebarProps> = ({ onSelectChat, selectedRoomId }) => {
       return chat.otherUser.state === 'online';
     }
     return false;
+  };
+
+  const isGroupChat = (chat: Chat): boolean => {
+    return chat.members.length > 2 || (chat.name !== null && chat.otherUser === null);
+  };
+
+  const handleFabClick = (event: React.MouseEvent<HTMLElement>) => {
+    setFabAnchorEl(event.currentTarget);
+  };
+
+  const handleFabClose = () => {
+    setFabAnchorEl(null);
+  };
+
+  const handleNewChat = () => {
+    handleFabClose();
+    setNewChatOpen(true);
+  };
+
+  const handleNewGroup = () => {
+    handleFabClose();
+    setNewGroupOpen(true);
   };
 
   const formatTime = (dateString: string | null): string => {
@@ -216,8 +241,15 @@ const Sidebar: React.FC<SidebarProps> = ({ onSelectChat, selectedRoomId }) => {
                       ) : null
                     }
                   >
-                    <Avatar src={getChatAvatar(chat)}>
-                      {getChatName(chat).charAt(0)}
+                    <Avatar
+                      src={getChatAvatar(chat)}
+                      sx={isGroupChat(chat) ? { bgcolor: 'primary.main' } : undefined}
+                    >
+                      {isGroupChat(chat) ? (
+                        <Group />
+                      ) : (
+                        getChatName(chat).charAt(0)
+                      )}
                     </Avatar>
                   </Badge>
                 </ListItemAvatar>
@@ -267,7 +299,7 @@ const Sidebar: React.FC<SidebarProps> = ({ onSelectChat, selectedRoomId }) => {
       <Fab
         color="primary"
         size="medium"
-        onClick={() => setNewChatOpen(true)}
+        onClick={handleFabClick}
         sx={{
           position: 'absolute',
           bottom: 24,
@@ -277,7 +309,24 @@ const Sidebar: React.FC<SidebarProps> = ({ onSelectChat, selectedRoomId }) => {
         <Add />
       </Fab>
 
+      {/* FAB Menu */}
+      <Menu
+        anchorEl={fabAnchorEl}
+        open={Boolean(fabAnchorEl)}
+        onClose={handleFabClose}
+        anchorOrigin={{ vertical: 'top', horizontal: 'center' }}
+        transformOrigin={{ vertical: 'bottom', horizontal: 'center' }}
+      >
+        <MenuItem onClick={handleNewChat}>
+          <PersonAdd sx={{ mr: 1 }} /> New Chat
+        </MenuItem>
+        <MenuItem onClick={handleNewGroup}>
+          <GroupAdd sx={{ mr: 1 }} /> New Group
+        </MenuItem>
+      </Menu>
+
       <NewChatDialog open={newChatOpen} onClose={() => setNewChatOpen(false)} />
+      <NewGroupDialog open={newGroupOpen} onClose={() => setNewGroupOpen(false)} />
     </Box>
   );
 };

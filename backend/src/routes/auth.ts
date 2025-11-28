@@ -6,6 +6,7 @@ import {
   requestOtpSchema,
   verifyOtpSchema,
   refreshTokenSchema,
+  logoutSchema,
 } from '../middleware/validation.js';
 import { AuthenticatedRequest } from '../types/index.js';
 
@@ -94,11 +95,12 @@ router.post(
 
 /**
  * POST /api/auth/logout
- * Logout user
+ * Logout user - requires refreshToken to prevent session DoS
  */
 router.post(
   '/logout',
   authMiddleware,
+  validate(logoutSchema),
   async (req: AuthenticatedRequest, res: Response, next) => {
     try {
       const { refreshToken } = req.body;

@@ -1,5 +1,18 @@
 import { io, Socket } from 'socket.io-client';
-import { Message, TypingEvent, PresenceEvent, UnreadCountEvent } from '../types';
+import {
+  Message,
+  TypingEvent,
+  PresenceEvent,
+  UnreadCountEvent,
+  MemberAddedEvent,
+  MemberRemovedEvent,
+  MemberLeftEvent,
+  RoleChangedEvent,
+  RoomKeyRotatedEvent,
+  GroupUpdatedEvent,
+  GroupDeletedEvent,
+  GroupCreatedEvent,
+} from '../types';
 
 const SOCKET_URL = import.meta.env.VITE_SOCKET_URL || 'http://localhost:5001';
 
@@ -10,6 +23,19 @@ type PresenceHandler = (event: PresenceEvent) => void;
 type UnreadCountHandler = (event: UnreadCountEvent) => void;
 type MessagesReadHandler = (event: { roomId: string; userId: string }) => void;
 type ErrorHandler = (error: { message: string }) => void;
+// FIX-11 & FIX-13: Add disconnect and reconnect handlers
+type DisconnectHandler = (reason: string) => void;
+type ReconnectHandler = () => void;
+
+// Group event handlers
+type MemberAddedHandler = (event: MemberAddedEvent) => void;
+type MemberRemovedHandler = (event: MemberRemovedEvent) => void;
+type MemberLeftHandler = (event: MemberLeftEvent) => void;
+type RoleChangedHandler = (event: RoleChangedEvent) => void;
+type RoomKeyRotatedHandler = (event: RoomKeyRotatedEvent) => void;
+type GroupUpdatedHandler = (event: GroupUpdatedEvent) => void;
+type GroupDeletedHandler = (event: GroupDeletedEvent) => void;
+type GroupCreatedHandler = (event: GroupCreatedEvent) => void;
 
 class SocketService {
   private socket: Socket | null = null;
@@ -20,6 +46,22 @@ class SocketService {
   private unreadCountHandlers: UnreadCountHandler[] = [];
   private messagesReadHandlers: MessagesReadHandler[] = [];
   private errorHandlers: ErrorHandler[] = [];
+  // FIX-11 & FIX-13: Disconnect and reconnect handler arrays
+  private disconnectHandlers: DisconnectHandler[] = [];
+  private reconnectHandlers: ReconnectHandler[] = [];
+
+  // Group event handler arrays
+  private memberAddedHandlers: MemberAddedHandler[] = [];
+  private memberRemovedHandlers: MemberRemovedHandler[] = [];
+  private memberLeftHandlers: MemberLeftHandler[] = [];
+  private roleChangedHandlers: RoleChangedHandler[] = [];
+  private roomKeyRotatedHandlers: RoomKeyRotatedHandler[] = [];
+  private groupUpdatedHandlers: GroupUpdatedHandler[] = [];
+  private groupDeletedHandlers: GroupDeletedHandler[] = [];
+  private groupCreatedHandlers: GroupCreatedHandler[] = [];
+
+  // Track joined rooms for reconnection
+  private joinedRooms: Set<string> = new Set();
 
   async connect(token: string): Promise<void> {
     if (this.socket?.connected) {
@@ -37,6 +79,15 @@ class SocketService {
 
       this.socket.on('connect', () => {
         console.log('[Socket] Connected');
+        // Rejoin all previously joined rooms on reconnect
+        if (this.joinedRooms.size > 0) {
+          console.log('[Socket] Rejoining rooms:', Array.from(this.joinedRooms));
+          this.joinedRooms.forEach((roomId) => {
+            this.socket?.emit('join_room', { roomId });
+          });
+          // FIX-13: Notify reconnect handlers (for message sync)
+          this.reconnectHandlers.forEach((handler) => handler());
+        }
         resolve();
       });
 
@@ -47,6 +98,8 @@ class SocketService {
 
       this.socket.on('disconnect', (reason) => {
         console.log('[Socket] Disconnected:', reason);
+        // FIX-11: Notify disconnect handlers (for clearing rotation flags, etc.)
+        this.disconnectHandlers.forEach((handler) => handler(reason));
       });
 
       this.socket.on('new_message', (data: { message: Message }) => {
@@ -76,6 +129,39 @@ class SocketService {
       this.socket.on('error', (error: { message: string }) => {
         this.errorHandlers.forEach((handler) => handler(error));
       });
+
+      // Group event listeners
+      this.socket.on('member_added', (event: MemberAddedEvent) => {
+        this.memberAddedHandlers.forEach((handler) => handler(event));
+      });
+
+      this.socket.on('member_removed', (event: MemberRemovedEvent) => {
+        this.memberRemovedHandlers.forEach((handler) => handler(event));
+      });
+
+      this.socket.on('member_left', (event: MemberLeftEvent) => {
+        this.memberLeftHandlers.forEach((handler) => handler(event));
+      });
+
+      this.socket.on('role_changed', (event: RoleChangedEvent) => {
+        this.roleChangedHandlers.forEach((handler) => handler(event));
+      });
+
+      this.socket.on('room_key_rotated', (event: RoomKeyRotatedEvent) => {
+        this.roomKeyRotatedHandlers.forEach((handler) => handler(event));
+      });
+
+      this.socket.on('group_updated', (event: GroupUpdatedEvent) => {
+        this.groupUpdatedHandlers.forEach((handler) => handler(event));
+      });
+
+      this.socket.on('group_deleted', (event: GroupDeletedEvent) => {
+        this.groupDeletedHandlers.forEach((handler) => handler(event));
+      });
+
+      this.socket.on('group_created', (event: GroupCreatedEvent) => {
+        this.groupCreatedHandlers.forEach((handler) => handler(event));
+      });
     });
   }
 
@@ -84,6 +170,8 @@ class SocketService {
       this.socket.disconnect();
       this.socket = null;
     }
+    // Clear joined rooms on disconnect
+    this.joinedRooms.clear();
   }
 
   isConnected(): boolean {
@@ -91,10 +179,12 @@ class SocketService {
   }
 
   joinRoom(roomId: string): void {
+    this.joinedRooms.add(roomId);
     this.socket?.emit('join_room', { roomId });
   }
 
   leaveRoom(roomId: string): void {
+    this.joinedRooms.delete(roomId);
     this.socket?.emit('leave_room', { roomId });
   }
 
@@ -160,6 +250,79 @@ class SocketService {
     this.errorHandlers.push(handler);
     return () => {
       this.errorHandlers = this.errorHandlers.filter((h) => h !== handler);
+    };
+  }
+
+  // Group event handler registration methods
+  onMemberAdded(handler: MemberAddedHandler): () => void {
+    this.memberAddedHandlers.push(handler);
+    return () => {
+      this.memberAddedHandlers = this.memberAddedHandlers.filter((h) => h !== handler);
+    };
+  }
+
+  onMemberRemoved(handler: MemberRemovedHandler): () => void {
+    this.memberRemovedHandlers.push(handler);
+    return () => {
+      this.memberRemovedHandlers = this.memberRemovedHandlers.filter((h) => h !== handler);
+    };
+  }
+
+  onMemberLeft(handler: MemberLeftHandler): () => void {
+    this.memberLeftHandlers.push(handler);
+    return () => {
+      this.memberLeftHandlers = this.memberLeftHandlers.filter((h) => h !== handler);
+    };
+  }
+
+  onRoleChanged(handler: RoleChangedHandler): () => void {
+    this.roleChangedHandlers.push(handler);
+    return () => {
+      this.roleChangedHandlers = this.roleChangedHandlers.filter((h) => h !== handler);
+    };
+  }
+
+  onRoomKeyRotated(handler: RoomKeyRotatedHandler): () => void {
+    this.roomKeyRotatedHandlers.push(handler);
+    return () => {
+      this.roomKeyRotatedHandlers = this.roomKeyRotatedHandlers.filter((h) => h !== handler);
+    };
+  }
+
+  onGroupUpdated(handler: GroupUpdatedHandler): () => void {
+    this.groupUpdatedHandlers.push(handler);
+    return () => {
+      this.groupUpdatedHandlers = this.groupUpdatedHandlers.filter((h) => h !== handler);
+    };
+  }
+
+  onGroupDeleted(handler: GroupDeletedHandler): () => void {
+    this.groupDeletedHandlers.push(handler);
+    return () => {
+      this.groupDeletedHandlers = this.groupDeletedHandlers.filter((h) => h !== handler);
+    };
+  }
+
+  onGroupCreated(handler: GroupCreatedHandler): () => void {
+    this.groupCreatedHandlers.push(handler);
+    return () => {
+      this.groupCreatedHandlers = this.groupCreatedHandlers.filter((h) => h !== handler);
+    };
+  }
+
+  // FIX-11: Disconnect handler registration
+  onDisconnect(handler: DisconnectHandler): () => void {
+    this.disconnectHandlers.push(handler);
+    return () => {
+      this.disconnectHandlers = this.disconnectHandlers.filter((h) => h !== handler);
+    };
+  }
+
+  // FIX-13: Reconnect handler registration
+  onReconnect(handler: ReconnectHandler): () => void {
+    this.reconnectHandlers.push(handler);
+    return () => {
+      this.reconnectHandlers = this.reconnectHandlers.filter((h) => h !== handler);
     };
   }
 }

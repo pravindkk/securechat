@@ -45,7 +45,7 @@ router.post(
   validate(sendMessageSchema),
   async (req: AuthenticatedRequest, res: Response, next) => {
     try {
-      const { encryptedContent, iv, authTag, type, mediaUrl, mediaType } = req.body;
+      const { encryptedContent, iv, authTag, type, mediaUrl, mediaType, keyVersion } = req.body;
       const roomId = req.params.roomId;
       const senderId = req.user!.id;
 
@@ -56,6 +56,7 @@ router.post(
         type,
         mediaUrl,
         mediaType,
+        keyVersion,
       });
 
       // Get sender info
@@ -116,15 +117,20 @@ router.post(
 );
 
 /**
- * DELETE /api/messages/:messageId
+ * DELETE /api/messages/:roomId/:messageId
  * Delete a message
+ * Admins can delete any message in groups, members can only delete their own
  */
 router.delete(
-  '/:messageId',
+  '/:roomId/:messageId',
   authMiddleware,
   async (req: AuthenticatedRequest, res: Response, next) => {
     try {
-      await messageService.deleteMessage(req.params.messageId, req.user!.id);
+      await messageService.deleteMessage(
+        req.params.messageId,
+        req.user!.id,
+        req.params.roomId
+      );
       res.json({
         success: true,
         message: 'Message deleted successfully',

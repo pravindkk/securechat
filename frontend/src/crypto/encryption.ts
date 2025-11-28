@@ -203,6 +203,58 @@ export async function decryptRoomKey(
 }
 
 /**
+ * Decrypt room key and return raw bytes (for re-encryption)
+ */
+export async function decryptRoomKeyToBytes(
+  encryptedRoomKey: string,
+  privateKey: CryptoKey
+): Promise<ArrayBuffer> {
+  const encryptedBytes = base64ToArrayBuffer(encryptedRoomKey);
+
+  return crypto.subtle.decrypt(
+    { name: 'RSA-OAEP' },
+    privateKey,
+    encryptedBytes
+  );
+}
+
+/**
+ * Generate a new AES-256-GCM room key
+ */
+export async function generateRoomKey(): Promise<CryptoKey> {
+  return crypto.subtle.generateKey(
+    { name: 'AES-GCM', length: 256 },
+    true,
+    ['encrypt', 'decrypt']
+  );
+}
+
+/**
+ * Export room key to raw bytes
+ */
+export async function exportRoomKey(key: CryptoKey): Promise<ArrayBuffer> {
+  return crypto.subtle.exportKey('raw', key);
+}
+
+/**
+ * Encrypt room key with user's RSA public key
+ */
+export async function encryptRoomKeyForUser(
+  roomKeyBytes: ArrayBuffer,
+  publicKeyPem: string
+): Promise<string> {
+  const publicKey = await importPublicKey(publicKeyPem);
+
+  const encryptedBytes = await crypto.subtle.encrypt(
+    { name: 'RSA-OAEP' },
+    publicKey,
+    roomKeyBytes
+  );
+
+  return arrayBufferToBase64(encryptedBytes);
+}
+
+/**
  * Decrypt the user's private key using OTP-derived key
  */
 export async function decryptPrivateKey(

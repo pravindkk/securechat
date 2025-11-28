@@ -38,13 +38,15 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
       try {
         const storedTokens = api.loadTokens();
         if (storedTokens) {
-          const response = await api.getCurrentUser();
-          if (response.success && response.data) {
-            // Try to restore key manager from stored private key
-            const storedPrivateKey = sessionStorage.getItem('privateKeyPem');
-            if (storedPrivateKey) {
+          // First check if we have the private key in session storage
+          const storedPrivateKey = sessionStorage.getItem('privateKeyPem');
+
+          if (storedPrivateKey) {
+            // Session storage has private key - validate tokens and restore session
+            const response = await api.getCurrentUser();
+            if (response.success && response.data) {
               await keyManager.reinitialize(storedPrivateKey);
-              
+
               setUser(response.data.user);
               setTokens(storedTokens);
               setIsAuthenticated(true);
@@ -52,16 +54,23 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
               // Connect to socket
               await socketService.connect(storedTokens.accessToken);
             } else {
-              // No private key in session storage - user needs to re-login
-              // This happens when the browser tab was closed
-              console.log('No encryption keys found in session. Logging out...');
+              // Token validation failed - clear everything
+              console.log('Token validation failed during session restore');
               api.setTokens(null);
+              sessionStorage.removeItem('privateKeyPem');
             }
+          } else {
+            // No private key in session storage - user needs to re-login
+            // This happens when the browser tab was closed and reopened
+            // Clear tokens to force a clean login flow
+            console.log('Session expired: encryption keys not found. Please log in again.');
+            api.setTokens(null);
           }
         }
       } catch (error) {
         console.error('Auth initialization failed:', error);
         api.setTokens(null);
+        sessionStorage.removeItem('privateKeyPem');
       } finally {
         setIsLoading(false);
       }
@@ -100,16 +109,17 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
 
     // Set tokens first
     api.setTokens(userTokens);
-    setUser(userData);
-    setTokens(userTokens);
-    setIsAuthenticated(true);
 
-    // Connect to socket
-    await socketService.connect(userTokens.accessToken);
-
-    // Initialize key manager with the OTP
-    // The OTP is used to decrypt the private key
-    await keyManager.initialize(encryptedPrivateKey, otp, email, keyEncryptionSalt);
+    // FIX-9: Initialize key manager BEFORE connecting socket
+    // This ensures keys are ready when socket messages arrive
+    try {
+      await keyManager.initialize(encryptedPrivateKey, otp, email, keyEncryptionSalt);
+    } catch (keyError) {
+      // Key initialization failed - roll back the auth state
+      console.error('Failed to initialize encryption keys:', keyError);
+      api.setTokens(null);
+      throw new Error('Failed to decrypt encryption keys. Please try again.');
+    }
 
     // Store the decrypted private key PEM in session storage
     // (This allows key recovery without re-entering OTP during the session)
@@ -117,6 +127,14 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
     if (privateKeyPem) {
       sessionStorage.setItem('privateKeyPem', privateKeyPem);
     }
+
+    // Now set auth state and connect socket (after keys are ready)
+    setUser(userData);
+    setTokens(userTokens);
+    setIsAuthenticated(true);
+
+    // Connect to socket (now keys are initialized)
+    await socketService.connect(userTokens.accessToken);
   }, []);
 
   const logout = useCallback(async () => {

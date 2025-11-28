@@ -3,11 +3,38 @@ import path from 'path';
 
 dotenv.config({ path: path.resolve(process.cwd(), '.env') });
 
+const isProduction = process.env.NODE_ENV === 'production';
+
 function requireEnv(key: string, defaultValue?: string): string {
   const value = process.env[key] || defaultValue;
   if (!value) {
     throw new Error(`Missing required environment variable: ${key}`);
   }
+  return value;
+}
+
+// Default values that should NEVER be used in production
+const INSECURE_DEFAULTS = [
+  'dev_jwt_secret_key_change_in_production_32chars',
+  'dev_refresh_secret_change_in_production_32',
+];
+
+function requireSecureSecret(key: string, defaultValue: string): string {
+  const value = process.env[key] || defaultValue;
+
+  // In production, ensure we're not using default/weak secrets
+  if (isProduction) {
+    if (!process.env[key]) {
+      throw new Error(`Production requires explicit ${key} environment variable`);
+    }
+    if (INSECURE_DEFAULTS.includes(value)) {
+      throw new Error(`${key} is using an insecure default value in production`);
+    }
+    if (value.length < 32) {
+      throw new Error(`${key} must be at least 32 characters in production`);
+    }
+  }
+
   return value;
 }
 
@@ -18,10 +45,10 @@ export const config = {
   corsOrigin: process.env.CORS_ORIGIN || 'http://localhost:3001',
   
   jwt: {
-    secret: requireEnv('JWT_SECRET', 'dev_jwt_secret_key_change_in_production_32chars'),
-    refreshSecret: requireEnv('JWT_REFRESH_SECRET', 'dev_refresh_secret_change_in_production_32'),
-    accessExpiry: '15m',
-    refreshExpiry: '7d',
+    secret: requireSecureSecret('JWT_SECRET', 'dev_jwt_secret_key_change_in_production_32chars'),
+    refreshSecret: requireSecureSecret('JWT_REFRESH_SECRET', 'dev_refresh_secret_change_in_production_32'),
+    accessExpiry: process.env.JWT_ACCESS_EXPIRY || '15m',
+    refreshExpiry: process.env.JWT_REFRESH_EXPIRY || '7d',
   },
   
   mongodb: {
@@ -47,7 +74,7 @@ export const config = {
   },
   
   encryption: {
-    masterKey: process.env.MASTER_ENCRYPTION_KEY || '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+    masterKey: requireEnv('MASTER_ENCRYPTION_KEY'),
   },
 };
 
