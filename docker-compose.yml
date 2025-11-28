@@ -1,0 +1,117 @@
+version: '3.8'
+
+services:
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "3000:80"
+    depends_on:
+      - backend
+    networks:
+      - chatnet
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    ports:
+      - "5001:5001"
+    environment:
+      - NODE_ENV=production
+      - PORT=5001
+      - DATABASE_URL=postgresql://chatapp:chatapp_secret_password@postgres:5432/chatapp?schema=public
+      - MONGODB_URI=mongodb://mongo:27017/chatapp
+      - REDIS_URL=redis://redis:6379
+      - JWT_SECRET=${JWT_SECRET:-your_super_secret_jwt_key_change_in_production_min_32_chars}
+      - JWT_REFRESH_SECRET=${JWT_REFRESH_SECRET:-your_super_secret_refresh_key_change_in_production_min_32}
+      - MINIO_ENDPOINT=minio
+      - MINIO_PORT=9000
+      - MINIO_ACCESS_KEY=minioadmin
+      - MINIO_SECRET_KEY=minioadmin_secret_key
+      - MINIO_BUCKET=chatapp
+      - MINIO_USE_SSL=false
+      - CORS_ORIGIN=http://localhost:3000
+      - MASTER_ENCRYPTION_KEY=${MASTER_ENCRYPTION_KEY:-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mongo:
+        condition: service_started
+      redis:
+        condition: service_started
+    networks:
+      - chatnet
+
+  postgres:
+    image: postgres:15-alpine
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    environment:
+      - POSTGRES_USER=chatapp
+      - POSTGRES_PASSWORD=chatapp_secret_password
+      - POSTGRES_DB=chatapp
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U chatapp -d chatapp"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - chatnet
+
+  mongo:
+    image: mongo:7
+    volumes:
+      - mongo_data:/data/db
+    environment:
+      - MONGO_INITDB_DATABASE=chatapp
+    networks:
+      - chatnet
+
+  redis:
+    image: redis:7-alpine
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+    networks:
+      - chatnet
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    volumes:
+      - minio_data:/data
+    environment:
+      - MINIO_ROOT_USER=minioadmin
+      - MINIO_ROOT_PASSWORD=minioadmin_secret_key
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    networks:
+      - chatnet
+
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      - minio
+    entrypoint: >
+      /bin/sh -c "
+      sleep 5;
+      mc alias set myminio http://minio:9000 minioadmin minioadmin_secret_key;
+      mc mb myminio/chatapp --ignore-existing;
+      mc anonymous set public myminio/chatapp;
+      exit 0;
+      "
+    networks:
+      - chatnet
+
+volumes:
+  postgres_data:
+  mongo_data:
+  redis_data:
+  minio_data:
+
+networks:
+  chatnet:
+    driver: bridge

@@ -1,0 +1,99 @@
+# ===========================================
+# INFRASTRUCTURE ONLY - For Local Development
+# ===========================================
+# Use this to run databases and services while developing
+# backend and frontend locally.
+#
+# Usage:
+#   docker-compose -f docker-compose.infra.yml up -d
+#
+# Then run backend and frontend manually:
+#   cd backend && npm run dev
+#   cd frontend && npm run dev
+
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: secure-chat-postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    environment:
+      - POSTGRES_USER=chatapp
+      - POSTGRES_PASSWORD=chatapp
+      - POSTGRES_DB=chatapp
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U chatapp -d chatapp"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - infra-net
+
+  mongo:
+    image: mongo:7
+    container_name: secure-chat-mongo
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+    environment:
+      - MONGO_INITDB_DATABASE=chatapp
+    networks:
+      - infra-net
+
+  redis:
+    image: redis:7-alpine
+    container_name: secure-chat-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+    networks:
+      - infra-net
+
+  minio:
+    image: minio/minio:latest
+    container_name: secure-chat-minio
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data:/data
+    environment:
+      - MINIO_ROOT_USER=minioadmin
+      - MINIO_ROOT_PASSWORD=minioadmin
+    networks:
+      - infra-net
+
+  minio-init:
+    image: minio/mc:latest
+    container_name: secure-chat-minio-init
+    depends_on:
+      - minio
+    entrypoint: >
+      /bin/sh -c "
+      sleep 5;
+      mc alias set myminio http://minio:9000 minioadmin minioadmin;
+      mc mb myminio/chatapp --ignore-existing;
+      mc anonymous set public myminio/chatapp;
+      echo 'MinIO bucket created successfully';
+      exit 0;
+      "
+    networks:
+      - infra-net
+
+volumes:
+  postgres_data:
+  mongo_data:
+  redis_data:
+  minio_data:
+
+networks:
+  infra-net:
+    driver: bridge
