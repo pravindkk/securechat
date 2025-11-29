@@ -544,6 +544,14 @@ export class RoomService {
         where: { roomId, userId: targetMemberId },
       });
 
+      // Step 2.5: Clean up any historical key entries for removed member
+      await tx.roomMemberKeyHistory.deleteMany({
+        where: {
+          roomKeyHistory: { roomId },
+          userId: targetMemberId,
+        },
+      });
+
       // Step 3: Archive current room key (now without the removed member)
       // Get remaining members after removal
       const remainingMembers = await tx.roomMember.findMany({
