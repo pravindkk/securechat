@@ -1,9 +1,12 @@
-import React from 'react';
+import React, { Suspense, lazy } from 'react';
 import { ThemeProvider, createTheme, CssBaseline, CircularProgress, Box } from '@mui/material';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
-import { ChatProvider } from './contexts/ChatContext';
+import { ChatProviders } from './contexts/ChatProviders';
+import ErrorBoundary from './components/ErrorBoundary';
 import AuthPage from './components/Auth/AuthPage';
-import ChatPage from './components/Chat/ChatPage';
+
+// Lazy load ChatPage for code splitting
+const ChatPage = lazy(() => import('./components/Chat/ChatPage'));
 
 const theme = createTheme({
   palette: {
@@ -78,9 +81,13 @@ const AppContent: React.FC = () => {
   }
 
   return (
-    <ChatProvider>
-      <ChatPage />
-    </ChatProvider>
+    <ErrorBoundary>
+      <ChatProviders>
+        <Suspense fallback={<LoadingScreen />}>
+          <ChatPage />
+        </Suspense>
+      </ChatProviders>
+    </ErrorBoundary>
   );
 };
 

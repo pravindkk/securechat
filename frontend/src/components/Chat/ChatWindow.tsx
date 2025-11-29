@@ -1,4 +1,11 @@
-import React, { useState, useRef, useEffect } from 'react';
+/**
+ * ChatWindow Component
+ *
+ * Main chat interface with virtualized message list for performance.
+ * Supports text and image messages, typing indicators, and group chats.
+ */
+
+import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import {
   Box,
   TextField,
@@ -6,12 +13,13 @@ import {
   Avatar,
   Typography,
   CircularProgress,
-  Paper,
   InputAdornment,
   Dialog,
   DialogContent,
   Snackbar,
   Alert,
+  useTheme,
+  useMediaQuery,
 } from '@mui/material';
 import {
   Send,
@@ -28,8 +36,9 @@ import { useChat } from '../../contexts/ChatContext';
 import { Room, Message } from '../../types';
 import { socketService } from '../../services/socket';
 import { api } from '../../services/api';
-import SystemMessage from './SystemMessage';
+import VirtualizedMessageList from './VirtualizedMessageList';
 import GroupInfoPanel from './GroupInfoPanel';
+import { MessageListSkeleton } from '../Skeletons';
 
 interface ChatWindowProps {
   room: Room;
@@ -40,9 +49,19 @@ interface ChatWindowProps {
 const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
 const ALLOWED_IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
 
-const ChatWindow: React.FC<ChatWindowProps> = ({ room, onBack, isMobile }) => {
+const ChatWindow: React.FC<ChatWindowProps> = ({ room, onBack, isMobile: isMobileProp }) => {
+  const theme = useTheme();
+  // Multi-breakpoint responsive design
+  const isXs = useMediaQuery(theme.breakpoints.down('sm'));
+  const isSm = useMediaQuery(theme.breakpoints.between('sm', 'md'));
+  const isLgUp = useMediaQuery(theme.breakpoints.up('lg'));
+
+  // Use prop if provided, otherwise detect from breakpoint
+  const isMobile = isMobileProp ?? (isXs || isSm);
+
   const { user } = useAuth();
   const { messages, isLoadingMessages, hasMoreMessages, typingUsers, sendMessage, loadMoreMessages } = useChat();
+
   const [inputValue, setInputValue] = useState('');
   const [isSending, setIsSending] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
@@ -50,24 +69,19 @@ const ChatWindow: React.FC<ChatWindowProps> = ({ room, onBack, isMobile }) => {
   const [previewImage, setPreviewImage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [groupInfoOpen, setGroupInfoOpen] = useState(false);
-  
-  const messagesEndRef = useRef<HTMLDivElement>(null);
-  const messagesContainerRef = useRef<HTMLDivElement>(null);
-  const fileInputRef = useRef<HTMLInputElement>(null);
-  const typingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const [isTyping, setIsTyping] = useState(false);
 
-  const isGroup = room.members.length > 2 || (!room.isPrivate && room.name);
-  const otherUser = !isGroup
-    ? room.members.find((m) => m.id !== user?.id)
-    : null;
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const typingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
-  // Scroll to bottom when new messages arrive
-  useEffect(() => {
-    if (messagesEndRef.current) {
-      messagesEndRef.current.scrollIntoView({ behavior: 'smooth' });
-    }
-  }, [messages]);
+  const isGroup = room.members.length > 2 || (!room.isPrivate && room.name);
+  const otherUser = !isGroup ? room.members.find((m) => m.id !== user?.id) : null;
+
+  // Get typing users for current room
+  const roomTypingUsers = useMemo(() => {
+    const roomTypingMap = typingUsers.get(room.id);
+    return roomTypingMap ? Array.from(roomTypingMap.values()) : [];
+  }, [typingUsers, room.id]);
 
   // Cleanup typing timeout on unmount
   useEffect(() => {
@@ -81,22 +95,8 @@ const ChatWindow: React.FC<ChatWindowProps> = ({ room, onBack, isMobile }) => {
     };
   }, [room.id, isTyping]);
 
-  // Handle scroll for loading more messages
-  const handleScroll = async () => {
-    const container = messagesContainerRef.current;
-    if (!container || isLoadingMessages || !hasMoreMessages) return;
-
-    if (container.scrollTop === 0) {
-      const prevScrollHeight = container.scrollHeight;
-      await loadMoreMessages();
-      setTimeout(() => {
-        container.scrollTop = container.scrollHeight - prevScrollHeight;
-      }, 0);
-    }
-  };
-
-  // Typing indicator
-  const handleTyping = () => {
+  // Typing indicator handler
+  const handleTyping = useCallback(() => {
     if (!isTyping) {
       setIsTyping(true);
       socketService.sendTyping(room.id);
@@ -110,10 +110,10 @@ const ChatWindow: React.FC<ChatWindowProps> = ({ room, onBack, isMobile }) => {
       setIsTyping(false);
       socketService.sendStopTyping(room.id);
     }, 2000);
-  };
+  }, [room.id, isTyping]);
 
-  // Handle text message send
-  const handleSend = async () => {
+  // Send text message
+  const handleSend = useCallback(async () => {
     if (!inputValue.trim() || isSending) return;
 
     const content = inputValue.trim();
@@ -135,19 +135,17 @@ const ChatWindow: React.FC<ChatWindowProps> = ({ room, onBack, isMobile }) => {
     } finally {
       setIsSending(false);
     }
-  };
+  }, [inputValue, isSending, room.id, sendMessage]);
 
-  // Handle file selection
-  const handleFileSelect = async (event: React.ChangeEvent<HTMLInputElement>) => {
+  // Handle file upload
+  const handleFileSelect = useCallback(async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file) return;
 
-    // Reset input
     if (fileInputRef.current) {
       fileInputRef.current.value = '';
     }
 
-    // Validate file
     if (!ALLOWED_IMAGE_TYPES.includes(file.type)) {
       setError('Only images are allowed (JPEG, PNG, GIF, WebP)');
       return;
@@ -164,9 +162,8 @@ const ChatWindow: React.FC<ChatWindowProps> = ({ room, onBack, isMobile }) => {
     let uploadedKey: string | null = null;
 
     try {
-      // Upload file
       const uploadResult = await api.uploadFile(file, 'messages');
-      
+
       if (!uploadResult.success || !uploadResult.data) {
         throw new Error(uploadResult.error || 'Upload failed');
       }
@@ -174,26 +171,20 @@ const ChatWindow: React.FC<ChatWindowProps> = ({ room, onBack, isMobile }) => {
       uploadedKey = uploadResult.data.key;
       setUploadProgress('Encrypting...');
 
-      // Send as image message
-      // The caption/description is encrypted, mediaUrl is public
       const caption = file.name;
-      
+
       try {
         await sendMessage(caption, 'image', uploadResult.data.url, file.type);
       } catch (sendError) {
-        // Message send failed - clean up the orphaned uploaded file
         if (uploadedKey) {
           try {
             await api.deleteFile(uploadedKey);
-            console.log('Cleaned up orphaned file:', uploadedKey);
           } catch (cleanupError) {
             console.error('Failed to cleanup orphaned file:', cleanupError);
           }
         }
         throw sendError;
       }
-
-      setUploadProgress('');
     } catch (err) {
       console.error('Failed to upload image:', err);
       setError(err instanceof Error ? err.message : 'Failed to upload image');
@@ -201,21 +192,24 @@ const ChatWindow: React.FC<ChatWindowProps> = ({ room, onBack, isMobile }) => {
       setIsUploading(false);
       setUploadProgress('');
     }
-  };
+  }, [sendMessage]);
 
-  const handleKeyPress = (e: React.KeyboardEvent) => {
+  // Handle Enter key
+  const handleKeyPress = useCallback((e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       handleSend();
     }
-  };
+  }, [handleSend]);
 
-  const formatMessageTime = (timestamp: string): string => {
+  // Format message time
+  const formatMessageTime = useCallback((timestamp: string): string => {
     const date = new Date(timestamp);
     return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-  };
+  }, []);
 
-  const formatDateDivider = (timestamp: string): string => {
+  // Format date divider
+  const formatDateDivider = useCallback((timestamp: string): string => {
     const date = new Date(timestamp);
     const today = new Date();
     const yesterday = new Date(today);
@@ -227,21 +221,10 @@ const ChatWindow: React.FC<ChatWindowProps> = ({ room, onBack, isMobile }) => {
       return 'Yesterday';
     }
     return date.toLocaleDateString([], { weekday: 'long', month: 'long', day: 'numeric' });
-  };
+  }, []);
 
-  const shouldShowDateDivider = (message: Message, index: number): boolean => {
-    if (index === 0) return true;
-    const prevMessage = messages[index - 1];
-    const prevDate = new Date(prevMessage.timestamp).toDateString();
-    const currDate = new Date(message.timestamp).toDateString();
-    return prevDate !== currDate;
-  };
-
-  const roomTypingMap = typingUsers.get(room.id);
-  const roomTypingUsers = roomTypingMap ? Array.from(roomTypingMap.values()) : [];
-
-  // Render message content based on type
-  const renderMessageContent = (message: Message, _isOwn: boolean) => {
+  // Render message content
+  const renderMessageContent = useCallback((message: Message, isOwn: boolean) => {
     if (message.type === 'image' && message.mediaUrl) {
       return (
         <Box>
@@ -251,14 +234,12 @@ const ChatWindow: React.FC<ChatWindowProps> = ({ room, onBack, isMobile }) => {
             alt={message.decryptedContent || 'Image'}
             onClick={() => setPreviewImage(message.mediaUrl!)}
             sx={{
-              maxWidth: 250,
-              maxHeight: 300,
+              maxWidth: isMobile ? 200 : 250,
+              maxHeight: isMobile ? 250 : 300,
               borderRadius: 1,
               cursor: 'pointer',
               display: 'block',
-              '&:hover': {
-                opacity: 0.9,
-              },
+              '&:hover': { opacity: 0.9 },
             }}
             onError={(e) => {
               (e.target as HTMLImageElement).style.display = 'none';
@@ -286,7 +267,15 @@ const ChatWindow: React.FC<ChatWindowProps> = ({ room, onBack, isMobile }) => {
         {message.decryptedContent || '[Decrypting...]'}
       </Typography>
     );
-  };
+  }, [isMobile]);
+
+  // Calculate responsive widths
+  const maxMessageWidth = useMemo(() => {
+    if (isXs) return '85%';
+    if (isSm) return '75%';
+    if (isLgUp) return '60%';
+    return '70%';
+  }, [isXs, isSm, isLgUp]);
 
   return (
     <Box
@@ -300,34 +289,42 @@ const ChatWindow: React.FC<ChatWindowProps> = ({ room, onBack, isMobile }) => {
       {/* Header */}
       <Box
         sx={{
-          p: 2,
+          p: { xs: 1.5, sm: 2 },
           display: 'flex',
           alignItems: 'center',
-          gap: 2,
+          gap: { xs: 1, sm: 2 },
           bgcolor: 'background.paper',
           borderBottom: '1px solid',
           borderColor: 'divider',
         }}
       >
         {isMobile && onBack && (
-          <IconButton onClick={onBack} edge="start">
+          <IconButton onClick={onBack} edge="start" size={isXs ? 'small' : 'medium'}>
             <ArrowBack />
           </IconButton>
         )}
-        
+
         <Avatar
           src={isGroup ? (room.photoUrl || undefined) : (otherUser?.photoUrl || undefined)}
-          sx={{ width: 45, height: 45, bgcolor: isGroup ? 'primary.main' : undefined }}
+          sx={{
+            width: { xs: 38, sm: 45 },
+            height: { xs: 38, sm: 45 },
+            bgcolor: isGroup ? 'primary.main' : undefined,
+          }}
         >
           {isGroup ? (
-            <Group />
+            <Group fontSize={isXs ? 'small' : 'medium'} />
           ) : (
             (otherUser?.name || room.name || '?')[0]?.toUpperCase()
           )}
         </Avatar>
 
-        <Box sx={{ flex: 1 }}>
-          <Typography variant="subtitle1" fontWeight="medium">
+        <Box sx={{ flex: 1, minWidth: 0 }}>
+          <Typography
+            variant={isXs ? 'body1' : 'subtitle1'}
+            fontWeight="medium"
+            noWrap
+          >
             {isGroup ? room.name : (otherUser?.name || otherUser?.email || 'Chat')}
           </Typography>
           <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
@@ -351,132 +348,43 @@ const ChatWindow: React.FC<ChatWindowProps> = ({ room, onBack, isMobile }) => {
           </Box>
         </Box>
 
-        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-          <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
-            <Lock sx={{ fontSize: 16, color: 'success.main' }} />
-            <Typography variant="caption" color="success.main">
-              E2E Encrypted
-            </Typography>
-          </Box>
+        <Box sx={{ display: 'flex', alignItems: 'center', gap: { xs: 0.5, sm: 1 } }}>
+          {!isXs && (
+            <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
+              <Lock sx={{ fontSize: { xs: 14, sm: 16 }, color: 'success.main' }} />
+              <Typography variant="caption" color="success.main" sx={{ display: { xs: 'none', sm: 'block' } }}>
+                E2E Encrypted
+              </Typography>
+            </Box>
+          )}
           {isGroup && (
-            <IconButton onClick={() => setGroupInfoOpen(true)} size="small">
-              <Info />
+            <IconButton onClick={() => setGroupInfoOpen(true)} size={isXs ? 'small' : 'medium'}>
+              <Info fontSize={isXs ? 'small' : 'medium'} />
             </IconButton>
           )}
         </Box>
       </Box>
 
       {/* Messages */}
-      <Box
-        ref={messagesContainerRef}
-        onScroll={handleScroll}
-        sx={{
-          flex: 1,
-          overflow: 'auto',
-          p: 2,
-          display: 'flex',
-          flexDirection: 'column',
-          gap: 1,
-        }}
-      >
-        {isLoadingMessages && messages.length === 0 ? (
-          <Box sx={{ display: 'flex', justifyContent: 'center', py: 4 }}>
-            <CircularProgress />
-          </Box>
-        ) : (
-          <>
-            {hasMoreMessages && (
-              <Box sx={{ textAlign: 'center', py: 1 }}>
-                <Typography
-                  variant="caption"
-                  color="primary"
-                  sx={{ cursor: 'pointer' }}
-                  onClick={loadMoreMessages}
-                >
-                  Load earlier messages
-                </Typography>
-              </Box>
-            )}
-            
-            {messages.map((message, index) => {
-              const isOwn = message.senderId === user?.id;
-              const showDateDivider = shouldShowDateDivider(message, index);
-              const isSystemMessage = message.type === 'system';
+      {isLoadingMessages && messages.length === 0 ? (
+        <Box sx={{ flex: 1, overflow: 'hidden' }}>
+          <MessageListSkeleton count={10} />
+        </Box>
+      ) : (
+        <VirtualizedMessageList
+          messages={messages}
+          currentUserId={user?.id}
+          isLoading={isLoadingMessages}
+          hasMore={hasMoreMessages}
+          onLoadMore={loadMoreMessages}
+          typingUsers={roomTypingUsers}
+          renderMessageContent={renderMessageContent}
+          formatMessageTime={formatMessageTime}
+          formatDateDivider={formatDateDivider}
+        />
+      )}
 
-              return (
-                <React.Fragment key={message._id}>
-                  {showDateDivider && (
-                    <Box sx={{ textAlign: 'center', py: 2 }}>
-                      <Typography
-                        variant="caption"
-                        sx={{
-                          bgcolor: 'rgba(0,0,0,0.1)',
-                          px: 2,
-                          py: 0.5,
-                          borderRadius: 2,
-                        }}
-                      >
-                        {formatDateDivider(message.timestamp)}
-                      </Typography>
-                    </Box>
-                  )}
-
-                  {isSystemMessage ? (
-                    <SystemMessage message={message} currentUserId={user?.id} />
-                  ) : (
-                    <Box
-                      sx={{
-                        display: 'flex',
-                        justifyContent: isOwn ? 'flex-end' : 'flex-start',
-                        mb: 0.5,
-                      }}
-                    >
-                      <Paper
-                        elevation={0}
-                        sx={{
-                          p: 1.5,
-                          maxWidth: '70%',
-                          bgcolor: isOwn ? 'primary.main' : 'background.paper',
-                          color: isOwn ? 'white' : 'text.primary',
-                          borderRadius: 2,
-                          borderTopRightRadius: isOwn ? 0 : 2,
-                          borderTopLeftRadius: isOwn ? 2 : 0,
-                        }}
-                      >
-                        {renderMessageContent(message, isOwn)}
-                        <Typography
-                          variant="caption"
-                          sx={{
-                            display: 'block',
-                            textAlign: 'right',
-                            mt: 0.5,
-                            opacity: 0.7,
-                          }}
-                        >
-                          {formatMessageTime(message.timestamp)}
-                        </Typography>
-                      </Paper>
-                    </Box>
-                  )}
-                </React.Fragment>
-              );
-            })}
-          </>
-        )}
-        
-        {/* Typing indicator */}
-        {roomTypingUsers.length > 0 && (
-          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, py: 1 }}>
-            <Typography variant="caption" color="text.secondary">
-              {roomTypingUsers.join(', ')} {roomTypingUsers.length === 1 ? 'is' : 'are'} typing...
-            </Typography>
-          </Box>
-        )}
-        
-        <div ref={messagesEndRef} />
-      </Box>
-
-      {/* Upload progress indicator */}
+      {/* Upload progress */}
       {isUploading && (
         <Box
           sx={{
@@ -497,14 +405,13 @@ const ChatWindow: React.FC<ChatWindowProps> = ({ room, onBack, isMobile }) => {
       {/* Input */}
       <Box
         sx={{
-          p: 2,
+          p: { xs: 1, sm: 2 },
           bgcolor: 'background.paper',
           borderTop: '1px solid',
           borderColor: 'divider',
         }}
       >
-        <Box sx={{ display: 'flex', alignItems: 'flex-end', gap: 1 }}>
-          {/* Hidden file input */}
+        <Box sx={{ display: 'flex', alignItems: 'flex-end', gap: { xs: 0.5, sm: 1 } }}>
           <input
             type="file"
             ref={fileInputRef}
@@ -512,14 +419,14 @@ const ChatWindow: React.FC<ChatWindowProps> = ({ room, onBack, isMobile }) => {
             accept={ALLOWED_IMAGE_TYPES.join(',')}
             style={{ display: 'none' }}
           />
-          
-          {/* Attachment button */}
+
           <IconButton
             onClick={() => fileInputRef.current?.click()}
             disabled={isSending || isUploading}
             color="primary"
+            size={isXs ? 'small' : 'medium'}
           >
-            <ImageIcon />
+            <ImageIcon fontSize={isXs ? 'small' : 'medium'} />
           </IconButton>
 
           <TextField
@@ -534,6 +441,7 @@ const ChatWindow: React.FC<ChatWindowProps> = ({ room, onBack, isMobile }) => {
             }}
             onKeyPress={handleKeyPress}
             disabled={isUploading}
+            size={isXs ? 'small' : 'medium'}
             InputProps={{
               endAdornment: (
                 <InputAdornment position="end">
@@ -541,15 +449,20 @@ const ChatWindow: React.FC<ChatWindowProps> = ({ room, onBack, isMobile }) => {
                     color="primary"
                     onClick={handleSend}
                     disabled={!inputValue.trim() || isSending || isUploading}
+                    size={isXs ? 'small' : 'medium'}
                   >
-                    {isSending ? <CircularProgress size={24} /> : <Send />}
+                    {isSending ? (
+                      <CircularProgress size={isXs ? 18 : 24} />
+                    ) : (
+                      <Send fontSize={isXs ? 'small' : 'medium'} />
+                    )}
                   </IconButton>
                 </InputAdornment>
               ),
             }}
             sx={{
               '& .MuiOutlinedInput-root': {
-                borderRadius: 3,
+                borderRadius: { xs: 2, sm: 3 },
               },
             }}
           />
@@ -561,6 +474,7 @@ const ChatWindow: React.FC<ChatWindowProps> = ({ room, onBack, isMobile }) => {
         open={!!previewImage}
         onClose={() => setPreviewImage(null)}
         maxWidth="lg"
+        fullScreen={isXs}
       >
         <DialogContent sx={{ p: 0, position: 'relative' }}>
           <IconButton
@@ -603,7 +517,7 @@ const ChatWindow: React.FC<ChatWindowProps> = ({ room, onBack, isMobile }) => {
         </Alert>
       </Snackbar>
 
-      {/* Group Info Panel */}
+      {/* Group info panel */}
       {isGroup && (
         <GroupInfoPanel
           open={groupInfoOpen}

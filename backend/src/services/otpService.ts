@@ -1,41 +1,45 @@
+/**
+ * OTP Service
+ *
+ * Handles OTP generation and verification with Redis-based rate limiting.
+ */
+
 import { prisma } from '../config/database.js';
 import { config } from '../config/index.js';
 import { logger } from '../utils/logger.js';
 import { generateOtp, getExpiryDate, generateSalt } from '../utils/helpers.js';
-import { TooManyRequestsError } from '../middleware/errorHandler.js';
 import { OtpType } from '@prisma/client';
+import { rateLimitService } from './rateLimitService.js';
 
+// Rate limiting configuration
 const OTP_RATE_LIMIT = 5; // Max OTPs per 10 minutes
-const OTP_RATE_WINDOW = 10 * 60 * 1000; // 10 minutes
+const OTP_RATE_WINDOW_MS = 10 * 60 * 1000; // 10 minutes
 
-// Rate limiting for OTP verification attempts (prevents brute force)
+// Brute force protection configuration
 const OTP_VERIFY_LOCKOUT_ATTEMPTS = 10; // After this many failed attempts, lockout
-const OTP_VERIFY_LOCKOUT_DURATION = 15 * 60 * 1000; // 15 minute lockout
-
-// In-memory store for verification attempts (should use Redis in production)
-const verificationAttempts = new Map<string, { count: number; lastAttempt: number }>();
+const OTP_VERIFY_LOCKOUT_DURATION_MS = 15 * 60 * 1000; // 15 minute lockout
 
 export class OtpService {
+  /**
+   * Check rate limit for OTP generation using Redis
+   */
   async checkRateLimit(email: string, type: OtpType): Promise<void> {
-    const windowStart = new Date(Date.now() - OTP_RATE_WINDOW);
-    
-    const recentOtps = await prisma.otpCode.count({
-      where: {
-        email,
-        type,
-        createdAt: { gte: windowStart },
-      },
-    });
-
-    if (recentOtps >= OTP_RATE_LIMIT) {
-      throw new TooManyRequestsError('Too many OTP requests. Please try again later.');
-    }
+    await rateLimitService.enforceLimit(
+      `otp:${type}:${email}`,
+      OTP_RATE_LIMIT,
+      OTP_RATE_WINDOW_MS,
+      'Too many OTP requests.'
+    );
   }
 
   /**
-   * FIX-12: Use transaction to prevent race condition between invalidation and creation
+   * Generate OTP with transaction for atomicity
    */
-  async generateOtp(email: string, type: OtpType, userId?: string): Promise<{ otp: string; derivationSalt: string }> {
+  async generateOtp(
+    email: string,
+    type: OtpType,
+    userId?: string
+  ): Promise<{ otp: string; derivationSalt: string }> {
     const otp = generateOtp(config.otp.length);
     const derivationSalt = generateSalt();
 
@@ -72,60 +76,50 @@ export class OtpService {
   }
 
   /**
-   * Check rate limit for OTP verification attempts (prevents brute force)
+   * Check rate limit for OTP verification attempts using Redis
+   * Prevents brute force attacks
    */
-  private checkVerificationRateLimit(email: string): void {
-    const key = `verify:${email}`;
-    const now = Date.now();
-    const attempts = verificationAttempts.get(key);
-
-    if (attempts) {
-      // Check if user is in lockout period
-      if (
-        attempts.count >= OTP_VERIFY_LOCKOUT_ATTEMPTS &&
-        now - attempts.lastAttempt < OTP_VERIFY_LOCKOUT_DURATION
-      ) {
-        const remainingMinutes = Math.ceil(
-          (OTP_VERIFY_LOCKOUT_DURATION - (now - attempts.lastAttempt)) / 60000
-        );
-        throw new TooManyRequestsError(
-          `Too many failed verification attempts. Please try again in ${remainingMinutes} minutes.`
-        );
-      }
-
-      // Reset if lockout duration has passed
-      if (now - attempts.lastAttempt >= OTP_VERIFY_LOCKOUT_DURATION) {
-        verificationAttempts.delete(key);
-      }
-    }
+  private async checkVerificationRateLimit(email: string): Promise<void> {
+    await rateLimitService.enforceLockout(
+      `verify:${email}`,
+      OTP_VERIFY_LOCKOUT_ATTEMPTS,
+      OTP_VERIFY_LOCKOUT_DURATION_MS,
+      'Too many failed verification attempts.'
+    );
   }
 
   /**
-   * Record a failed verification attempt
+   * Record a failed verification attempt in Redis
    */
-  private recordFailedVerification(email: string): void {
-    const key = `verify:${email}`;
-    const now = Date.now();
-    const attempts = verificationAttempts.get(key);
-
-    if (attempts) {
-      attempts.count += 1;
-      attempts.lastAttempt = now;
-    } else {
-      verificationAttempts.set(key, { count: 1, lastAttempt: now });
-    }
+  private async recordFailedVerification(email: string): Promise<void> {
+    await rateLimitService.recordFailedAttempt(
+      `verify:${email}`,
+      OTP_VERIFY_LOCKOUT_ATTEMPTS,
+      OTP_VERIFY_LOCKOUT_DURATION_MS
+    );
   }
 
   /**
    * Clear verification attempts on successful verification
    */
-  private clearVerificationAttempts(email: string): void {
-    verificationAttempts.delete(`verify:${email}`);
+  private async clearVerificationAttempts(email: string): Promise<void> {
+    await rateLimitService.clearAttempts(`verify:${email}`);
   }
 
-  async verifyOtp(email: string, otp: string, type: OtpType): Promise<{ isValid: boolean; derivationSalt: string | null; userId: string | null }> {
+  /**
+   * Verify OTP with brute force protection
+   */
+  async verifyOtp(
+    email: string,
+    otp: string,
+    type: OtpType
+  ): Promise<{
+    isValid: boolean;
+    derivationSalt: string | null;
+    userId: string | null;
+  }> {
     // Check verification rate limit before attempting
-    this.checkVerificationRateLimit(email);
+    await this.checkVerificationRateLimit(email);
 
     const otpRecord = await prisma.otpCode.findFirst({
       where: {
@@ -138,14 +132,14 @@ export class OtpService {
     });
 
     if (!otpRecord) {
-      // Record failed attempt
-      this.recordFailedVerification(email);
+      // Record failed attempt in Redis
+      await this.recordFailedVerification(email);
       logger.warn(`Failed OTP verification attempt for ${email}`);
       return { isValid: false, derivationSalt: null, userId: null };
     }
 
     // Clear failed attempts on success
-    this.clearVerificationAttempts(email);
+    await this.clearVerificationAttempts(email);
 
     // Mark as used
     await prisma.otpCode.update({
