@@ -65,7 +65,7 @@ export default function NewGroupDialog({ open, onClose }: NewGroupDialogProps) {
       try {
         const response = await api.searchUsers(searchQuery);
         if (response.success && response.data) {
-          setSearchResults(response.data.users.filter((u) => u.id !== user?.id));
+          setSearchResults(response.data.filter((u: any) => u.id !== user?.id));
         }
       } catch (error) {
         console.error('Search failed:', error);

@@ -55,7 +55,7 @@ export default function NewChatDialog({ open, onClose }: NewChatDialogProps) {
         const response = await api.searchUsers(searchQuery);
         if (response.success && response.data) {
           // Filter out current user
-          setSearchResults(response.data.users.filter((u) => u.id !== user?.id));
+          setSearchResults(response.data.filter((u: any) => u.id !== user?.id));
         }
       } catch (error) {
         console.error('Search failed:', error);

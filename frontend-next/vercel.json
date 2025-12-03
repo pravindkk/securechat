@@ -1,0 +1,18 @@
+{
+  "functions": {
+    "src/app/api/**/*": {
+      "maxDuration": 30
+    }
+  },
+  "env": {
+    "DATABASE_URL": "@database-url",
+    "MONGODB_URI": "@mongodb-uri",
+    "JWT_SECRET": "@jwt-secret",
+    "JWT_REFRESH_SECRET": "@jwt-refresh-secret",
+    "MASTER_ENCRYPTION_KEY": "@master-encryption-key",
+    "PUSHER_APP_ID": "@pusher-app-id",
+    "PUSHER_SECRET": "@pusher-secret",
+    "NEXT_PUBLIC_PUSHER_KEY": "@pusher-key",
+    "NEXT_PUBLIC_PUSHER_CLUSTER": "@pusher-cluster"
+  }
+}

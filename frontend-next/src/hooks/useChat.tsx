@@ -182,7 +182,7 @@ export const ChatProvider: React.FC<ChatProviderProps> = ({ children }) => {
     try {
       const response = await api.getChats();
       if (response.success && response.data) {
-        setChats(response.data.chats);
+        setChats(response.data);
       }
     } catch (error) {
       console.error('Failed to load chats:', error);
@@ -279,7 +279,7 @@ export const ChatProvider: React.FC<ChatProviderProps> = ({ children }) => {
     const unsubUnreadCount = socketService.onUnreadCountUpdate((event) => {
       setChats((prev) =>
         prev.map((chat) =>
-          chat.id === event.roomId ? { ...chat, unreadCount: event.count } : chat
+          chat.id === event.roomId ? { ...chat, unreadCount: event.unreadCount } : chat
         )
       );
     });
@@ -325,13 +325,13 @@ export const ChatProvider: React.FC<ChatProviderProps> = ({ children }) => {
               const roomResponse = await api.getRoom(event.roomId);
               if (roomResponse.success && roomResponse.data) {
                 setCurrentRoom((prev) =>
-                  prev ? { ...prev, members: roomResponse.data!.room.members } : null
+                  prev ? { ...prev, members: roomResponse.data!.members } : null
                 );
 
                 if (messages.length > 0) {
                   const freshMessages = await Promise.all(
                     messages.map((msg) =>
-                      decryptMessage(msg, event.roomId, roomResponse.data!.room.members)
+                      decryptMessage(msg, event.roomId, roomResponse.data!.members)
                     )
                   );
                   setMessages(freshMessages);
@@ -353,7 +353,7 @@ export const ChatProvider: React.FC<ChatProviderProps> = ({ children }) => {
       }
     );
 
-    const unsubMemberLeft = socketService.onMemberLeft(async (event: MemberLeftEvent) => {
+    const unsubMemberLeft = socketService.onMemberLeft(async (event: any) => {
       keyManager.clearRoomKey(event.roomId);
       roomKeysCache.current.delete(event.roomId);
 
@@ -363,13 +363,13 @@ export const ChatProvider: React.FC<ChatProviderProps> = ({ children }) => {
           const roomResponse = await api.getRoom(event.roomId);
           if (roomResponse.success && roomResponse.data) {
             setCurrentRoom((prev) =>
-              prev ? { ...prev, members: roomResponse.data!.room.members } : null
+              prev ? { ...prev, members: roomResponse.data!.members } : null
             );
 
             if (messages.length > 0) {
               const freshMessages = await Promise.all(
                 messages.map((msg) =>
-                  decryptMessage(msg, event.roomId, roomResponse.data!.room.members)
+                  decryptMessage(msg, event.roomId, roomResponse.data!.members)
                 )
               );
               setMessages(freshMessages);
@@ -379,7 +379,7 @@ export const ChatProvider: React.FC<ChatProviderProps> = ({ children }) => {
           console.error('[MemberLeft] Failed to refresh room data:', error);
           setCurrentRoom((prev) =>
             prev
-              ? { ...prev, members: prev.members.filter((m) => m.id !== event.memberId) }
+              ? { ...prev, members: prev.members.filter((m) => m.id !== (event.memberId || event.userId)) }
               : null
           );
         } finally {
@@ -389,14 +389,14 @@ export const ChatProvider: React.FC<ChatProviderProps> = ({ children }) => {
       refreshChats();
     });
 
-    const unsubRoleChanged = socketService.onRoleChanged((event: RoleChangedEvent) => {
+    const unsubRoleChanged = socketService.onRoleChanged((event: any) => {
       if (currentRoom?.id === event.roomId) {
         setCurrentRoom((prev) =>
           prev
             ? {
                 ...prev,
                 members: prev.members.map((m) =>
-                  m.id === event.memberId ? { ...m, role: event.newRole } : m
+                  m.id === (event.memberId || event.userId) ? { ...m, role: event.newRole } : m
                 ),
               }
             : null
@@ -425,7 +425,7 @@ export const ChatProvider: React.FC<ChatProviderProps> = ({ children }) => {
             try {
               const roomResponse = await api.getRoom(event.roomId);
               if (roomResponse.success && roomResponse.data) {
-                const updatedMembers = roomResponse.data.room.members;
+                const updatedMembers = roomResponse.data.members;
 
                 setCurrentRoom((prev) =>
                   prev ? { ...prev, members: updatedMembers } : null
@@ -450,16 +450,16 @@ export const ChatProvider: React.FC<ChatProviderProps> = ({ children }) => {
       }
     );
 
-    const unsubGroupUpdated = socketService.onGroupUpdated((event: GroupUpdatedEvent) => {
+    const unsubGroupUpdated = socketService.onGroupUpdated((event: any) => {
       if (currentRoom?.id === event.roomId) {
         setCurrentRoom((prev) =>
           prev
             ? {
                 ...prev,
-                name: event.changes.name ?? prev.name,
+                name: (event.changes?.name || event.name) ?? prev.name,
                 photoUrl:
-                  event.changes.photoUrl !== undefined
-                    ? event.changes.photoUrl
+                  (event.changes?.photoUrl ?? event.photoUrl) !== undefined
+                    ? (event.changes?.photoUrl ?? event.photoUrl)
                     : prev.photoUrl,
               }
             : null
@@ -468,7 +468,7 @@ export const ChatProvider: React.FC<ChatProviderProps> = ({ children }) => {
       refreshChats();
     });
 
-    const unsubGroupDeleted = socketService.onGroupDeleted((event: GroupDeletedEvent) => {
+    const unsubGroupDeleted = socketService.onGroupDeleted((event: any) => {
       if (currentRoom?.id === event.roomId) {
         setCurrentRoom(null);
       }
@@ -624,17 +624,16 @@ export const ChatProvider: React.FC<ChatProviderProps> = ({ children }) => {
           authTag,
           type,
           mediaUrl,
-          mediaType,
-          keyVersion
+          mediaType
         );
 
         if (response.success && response.data) {
-          localStorage.setItem(`msg:${response.data.message._id}`, content);
+          localStorage.setItem(`msg:${response.data._id}`, content);
 
           setMessages((prev) =>
             prev.map((msg) =>
               msg._id === tempId
-                ? { ...response.data!.message, decryptedContent: content, pending: false }
+                ? { ...response.data!, decryptedContent: content, pending: false }
                 : msg
             )
           );
@@ -701,7 +700,7 @@ export const ChatProvider: React.FC<ChatProviderProps> = ({ children }) => {
         throw new Error(response.error || 'Failed to create room');
       }
       await refreshChats();
-      return response.data.room;
+      return response.data;
     },
     [refreshChats]
   );
@@ -714,7 +713,7 @@ export const ChatProvider: React.FC<ChatProviderProps> = ({ children }) => {
         throw new Error(response.error || 'Failed to create group');
       }
       await refreshChats();
-      return response.data.room;
+      return response.data;
     },
     [refreshChats]
   );
@@ -795,7 +794,7 @@ export const ChatProvider: React.FC<ChatProviderProps> = ({ children }) => {
         }
 
         const encryptedKeys: Record<string, string> = {};
-        for (const member of roomResponse.data.room.members) {
+        for (const member of roomResponse.data.members) {
           if (member.publicKey) {
             encryptedKeys[member.id] = await keyManager.encryptRoomKeyForUser(
               newRoomKeyBytes,
@@ -818,7 +817,7 @@ export const ChatProvider: React.FC<ChatProviderProps> = ({ children }) => {
           const freshRoom = await api.getRoom(roomId);
           if (freshRoom.success && freshRoom.data) {
             setCurrentRoom((prev) =>
-              prev ? { ...prev, members: freshRoom.data!.room.members } : null
+              prev ? { ...prev, members: freshRoom.data!.members } : null
             );
           }
         }

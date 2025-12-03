@@ -1,0 +1,174 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id           String   @id @default(uuid())
+  email        String   @unique
+  name         String?
+  photoUrl     String?  @map("photo_url")
+  state        String   @default("offline")
+  lastSeen     DateTime @default(now()) @map("last_seen")
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  // Encryption keys - RSA keypair for message decryption
+  publicKey                 String   @map("public_key")
+  encryptedPrivateKey       String   @map("encrypted_private_key")
+  keyEncryptionSalt         String   @map("key_encryption_salt")
+  masterEncryptedPrivateKey String   @map("master_encrypted_private_key")
+
+  // Relations
+  sessions     Session[]
+  otpCodes     OtpCode[]
+  devices      Device[]
+  roomsCreated Room[]       @relation("RoomCreator")
+  roomMembers  RoomMember[]
+  userChats    UserChat[]
+
+  @@map("users")
+}
+
+model Device {
+  id           String   @id @default(uuid())
+  userId       String   @map("user_id")
+  deviceName   String   @map("device_name")
+  deviceType   String   @map("device_type")
+  fingerprint  String   @unique
+  lastActive   DateTime @default(now()) @map("last_active")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("devices")
+}
+
+model OtpCode {
+  id        String   @id @default(uuid())
+  email     String
+  code      String
+  type      OtpType
+  expiresAt DateTime @map("expires_at")
+  used      Boolean  @default(false)
+  createdAt DateTime @default(now()) @map("created_at")
+
+  derivationSalt String? @map("derivation_salt")
+
+  user   User?   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId String? @map("user_id")
+
+  @@index([email, code, type])
+  @@map("otp_codes")
+}
+
+enum OtpType {
+  REGISTRATION
+  LOGIN
+}
+
+model Session {
+  id          String   @id @default(uuid())
+  userId      String   @map("user_id")
+  deviceId    String?  @map("device_id")
+  tokenHash   String   @map("token_hash")
+  expiresAt   DateTime @map("expires_at")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([tokenHash])
+  @@map("sessions")
+}
+
+model Room {
+  id        String   @id @default(uuid())
+  name      String?
+  isPrivate Boolean  @default(true) @map("is_private")
+  photoUrl  String?  @map("photo_url")
+  createdBy String   @map("created_by")
+
+  roomKeyVersion Int @default(1) @map("room_key_version")
+  maxMembers Int @default(30) @map("max_members")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  creator    User             @relation("RoomCreator", fields: [createdBy], references: [id])
+  members    RoomMember[]
+  userChats  UserChat[]
+  keyHistory RoomKeyHistory[]
+
+  @@map("rooms")
+}
+
+model RoomMember {
+  id          String    @id @default(uuid())
+  roomId      String    @map("room_id")
+  userId      String    @map("user_id")
+  role        String    @default("member")
+
+  encryptedRoomKey String @map("encrypted_room_key")
+  keyVersion       Int    @default(1) @map("key_version")
+
+  joinedAt    DateTime  @default(now()) @map("joined_at")
+  addedBy     String?   @map("added_by")
+  lastReadAt  DateTime? @map("last_read_at")
+  unreadCount Int       @default(0) @map("unread_count")
+
+  room Room @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([roomId, userId])
+  @@map("room_members")
+}
+
+model RoomKeyHistory {
+  id        String   @id @default(uuid())
+  roomId    String   @map("room_id")
+  version   Int
+  createdAt DateTime @default(now()) @map("created_at")
+
+  room       Room                   @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  memberKeys RoomMemberKeyHistory[]
+
+  @@unique([roomId, version])
+  @@index([roomId])
+  @@map("room_key_history")
+}
+
+model RoomMemberKeyHistory {
+  id               String @id @default(uuid())
+  roomKeyHistoryId String @map("room_key_history_id")
+  userId           String @map("user_id")
+  encryptedRoomKey String @map("encrypted_room_key")
+
+  roomKeyHistory RoomKeyHistory @relation(fields: [roomKeyHistoryId], references: [id], onDelete: Cascade)
+
+  @@unique([roomKeyHistoryId, userId])
+  @@index([userId])
+  @@map("room_member_key_history")
+}
+
+model UserChat {
+  id                 String    @id @default(uuid())
+  userId             String    @map("user_id")
+  roomId             String    @map("room_id")
+  otherUserId        String?   @map("other_user_id")
+  lastMessagePreview String?   @map("last_message_preview")
+  lastMessageAt      DateTime? @map("last_message_at")
+  unreadCount        Int       @default(0) @map("unread_count")
+  updatedAt          DateTime  @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  room Room @relation(fields: [roomId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, roomId])
+  @@index([userId, updatedAt])
+  @@map("user_chats")
+}

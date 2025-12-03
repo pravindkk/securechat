@@ -63,8 +63,8 @@ export default function AddMemberDialog({
         if (response.success && response.data) {
           // Filter out current user and existing members
           setSearchResults(
-            response.data.users.filter(
-              (u) => u.id !== user?.id && !existingMemberIds.includes(u.id)
+            response.data.filter(
+              (u: any) => u.id !== user?.id && !existingMemberIds.includes(u.id)
             )
           );
         }

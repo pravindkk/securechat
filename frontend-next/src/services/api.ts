@@ -7,12 +7,11 @@ import {
   RoomMember,
   Message,
   PaginatedResponse,
-  Device,
 } from '@/types';
-import { socketService } from './socket';
 import { indexedDBService } from '@/lib/indexeddb';
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:5001';
+// Use relative paths for internal API routes
+const API_URL = '';
 
 class ApiService {
   private accessToken: string | null = null;
@@ -96,7 +95,7 @@ class ApiService {
       const data = await response.json();
 
       // Handle token expiration
-      if (response.status === 401 && data.error === 'Token expired' && this.refreshToken) {
+      if (response.status === 401 && this.refreshToken) {
         const refreshed = await this.refresh();
         if (refreshed) {
           // Retry the request with new token
@@ -105,11 +104,11 @@ class ApiService {
             ...options,
             headers,
           });
-          return retryResponse.json();
+          return this.transformResponse(await retryResponse.json());
         }
       }
 
-      return data;
+      return this.transformResponse(data);
     } catch (error) {
       console.error('API request failed:', error);
       return {
@@ -117,6 +116,22 @@ class ApiService {
         error: error instanceof Error ? error.message : 'Request failed',
       };
     }
+  }
+
+  // Transform API response to match expected format
+  private transformResponse<T>(data: any): ApiResponse<T> {
+    // If response already has success field, return as-is
+    if ('success' in data) {
+      return data;
+    }
+
+    // If response has error field, it's an error
+    if ('error' in data) {
+      return { success: false, error: data.error };
+    }
+
+    // Otherwise, wrap data in success response
+    return { success: true, data };
   }
 
   // Auth endpoints
@@ -148,7 +163,6 @@ class ApiService {
   }
 
   async refresh(): Promise<boolean> {
-    // Handle concurrent refresh requests - queue them
     if (this.isRefreshing) {
       return new Promise((resolve) => {
         this.refreshQueue.push({ resolve });
@@ -157,7 +171,6 @@ class ApiService {
 
     if (!this.refreshToken) return false;
 
-    // Check retry limit to prevent infinite loops
     if (this.refreshRetryCount >= ApiService.MAX_REFRESH_RETRIES) {
       console.error('Max token refresh retries exceeded, forcing logout');
       await this.setTokens(null);
@@ -177,35 +190,20 @@ class ApiService {
 
       const data = await response.json();
 
-      if (data.success && data.data) {
-        await this.setTokens(data.data);
-        this.refreshRetryCount = 0; // Reset on success
-
-        // Reconnect socket with new token if it was connected
-        if (socketService.isConnected()) {
-          try {
-            socketService.disconnect();
-            await socketService.connect(data.data.accessToken);
-          } catch (socketError) {
-            console.error('Failed to reconnect socket after token refresh:', socketError);
-          }
-        }
-
-        // Resolve all queued refresh requests with success
+      if (data.accessToken && data.refreshToken) {
+        await this.setTokens(data);
+        this.refreshRetryCount = 0;
         this.refreshQueue.forEach(({ resolve }) => resolve(true));
         this.refreshQueue = [];
-
         return true;
       }
 
-      // Refresh response was not successful
       await this.setTokens(null);
       this.refreshQueue.forEach(({ resolve }) => resolve(false));
       this.refreshQueue = [];
       return false;
     } catch (error) {
       console.error('Token refresh failed:', error);
-      // Refresh failed - clear tokens and reject queued requests
       await this.setTokens(null);
       this.refreshQueue.forEach(({ resolve }) => resolve(false));
       this.refreshQueue = [];
@@ -224,44 +222,25 @@ class ApiService {
     return result;
   }
 
-  async getCurrentUser(): Promise<ApiResponse<{ user: User }>> {
+  async getCurrentUser(): Promise<ApiResponse<User>> {
     return this.request('/api/auth/me');
   }
 
-  async getEncryptedPrivateKey(): Promise<ApiResponse<{ encryptedPrivateKey: string; keyEncryptionSalt: string }>> {
-    return this.request('/api/auth/keys');
-  }
-
   // User endpoints
-  async searchUsers(query: string): Promise<ApiResponse<{ users: User[] }>> {
+  async searchUsers(query: string): Promise<ApiResponse<User[]>> {
     return this.request(`/api/users?q=${encodeURIComponent(query)}`);
   }
 
-  async getUser(userId: string): Promise<ApiResponse<{ user: User }>> {
+  async getUser(userId: string): Promise<ApiResponse<User>> {
     return this.request(`/api/users/${userId}`);
   }
 
   async updateUser(
-    userId: string,
     data: { name?: string; photoUrl?: string | null }
-  ): Promise<ApiResponse<{ user: User }>> {
-    return this.request(`/api/users/${userId}`, {
+  ): Promise<ApiResponse<User>> {
+    return this.request('/api/users/me', {
       method: 'PATCH',
       body: JSON.stringify(data),
-    });
-  }
-
-  async getUserPublicKey(userId: string): Promise<ApiResponse<{ publicKey: string }>> {
-    return this.request(`/api/users/${userId}/public-key`);
-  }
-
-  async getDevices(): Promise<ApiResponse<{ devices: Device[] }>> {
-    return this.request('/api/users/me/devices');
-  }
-
-  async removeDevice(deviceId: string): Promise<ApiResponse<void>> {
-    return this.request(`/api/users/me/devices/${deviceId}`, {
-      method: 'DELETE',
     });
   }
 
@@ -270,22 +249,22 @@ class ApiService {
     memberIds: string[],
     name?: string,
     isPrivate: boolean = true
-  ): Promise<ApiResponse<{ room: Room }>> {
+  ): Promise<ApiResponse<Room>> {
     return this.request('/api/rooms', {
       method: 'POST',
       body: JSON.stringify({ memberIds, name, isPrivate }),
     });
   }
 
-  async getChats(): Promise<ApiResponse<{ chats: Chat[] }>> {
-    return this.request('/api/rooms/chats');
+  async getChats(): Promise<ApiResponse<Chat[]>> {
+    return this.request('/api/rooms');
   }
 
-  async getRoom(roomId: string): Promise<ApiResponse<{ room: Room }>> {
+  async getRoom(roomId: string): Promise<ApiResponse<Room>> {
     return this.request(`/api/rooms/${roomId}`);
   }
 
-  async getRoomKey(roomId: string): Promise<ApiResponse<{ encryptedRoomKey: string }>> {
+  async getRoomKey(roomId: string): Promise<ApiResponse<{ encryptedRoomKey: string; keyVersion: number }>> {
     return this.request(`/api/rooms/${roomId}/key`);
   }
 
@@ -302,10 +281,10 @@ class ApiService {
   }
 
   // Group endpoints
-  async createGroupRoom(memberIds: string[], name: string): Promise<ApiResponse<{ room: Room }>> {
-    return this.request('/api/rooms/group', {
+  async createGroupRoom(memberIds: string[], name: string): Promise<ApiResponse<Room>> {
+    return this.request('/api/rooms', {
       method: 'POST',
-      body: JSON.stringify({ memberIds, name }),
+      body: JSON.stringify({ memberIds, name, isPrivate: false }),
     });
   }
 
@@ -314,80 +293,50 @@ class ApiService {
     userId: string,
     encryptedRoomKey: string,
     historicalKeys?: Array<{ version: number; encryptedKey: string }>
-  ): Promise<ApiResponse<{ message: string }>> {
+  ): Promise<ApiResponse<{ member: RoomMember }>> {
     return this.request(`/api/rooms/${roomId}/members`, {
       method: 'POST',
       body: JSON.stringify({ userId, encryptedRoomKey, historicalKeys }),
     });
   }
 
-  async removeMember(roomId: string, userId: string): Promise<ApiResponse<{ message: string }>> {
+  async removeMember(roomId: string, userId: string): Promise<ApiResponse<{ newKeyVersion: number }>> {
     return this.request(`/api/rooms/${roomId}/members/${userId}`, {
       method: 'DELETE',
     });
   }
 
-  async leaveRoom(
-    roomId: string
-  ): Promise<ApiResponse<{ roomDeleted: boolean; newAdminId?: string }>> {
+  async leaveRoom(roomId: string): Promise<ApiResponse<{ roomDeleted: boolean; newKeyVersion: number | null }>> {
     return this.request(`/api/rooms/${roomId}/leave`, {
       method: 'POST',
     });
   }
 
   async promoteMember(roomId: string, userId: string): Promise<ApiResponse<void>> {
-    return this.request(`/api/rooms/${roomId}/members/${userId}/promote`, {
-      method: 'POST',
+    return this.request(`/api/rooms/${roomId}/members/${userId}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ role: 'admin' }),
     });
   }
 
   async demoteMember(roomId: string, userId: string): Promise<ApiResponse<void>> {
-    return this.request(`/api/rooms/${roomId}/members/${userId}/demote`, {
-      method: 'POST',
-    });
-  }
-
-  async updateGroup(
-    roomId: string,
-    data: { name?: string; photoUrl?: string | null }
-  ): Promise<ApiResponse<{ room: Room }>> {
-    return this.request(`/api/rooms/${roomId}`, {
+    return this.request(`/api/rooms/${roomId}/members/${userId}`, {
       method: 'PATCH',
-      body: JSON.stringify(data),
+      body: JSON.stringify({ role: 'member' }),
     });
   }
 
-  async getRoomMembers(roomId: string): Promise<ApiResponse<{ members: RoomMember[] }>> {
+  async getRoomMembers(roomId: string): Promise<ApiResponse<RoomMember[]>> {
     return this.request(`/api/rooms/${roomId}/members`);
-  }
-
-  async getRoomKeyVersion(
-    roomId: string,
-    version: number
-  ): Promise<ApiResponse<{ encryptedRoomKey: string; version: number }>> {
-    return this.request(`/api/rooms/${roomId}/key/${version}`);
-  }
-
-  async getRoomKeyHistory(roomId: string): Promise<ApiResponse<{
-    keyHistory: Array<{ version: number; encryptedRoomKey: string }>;
-    currentVersion: number;
-  }>> {
-    return this.request(`/api/rooms/${roomId}/key-history`);
   }
 
   async rotateRoomKey(
     roomId: string,
     encryptedKeys: Record<string, string>
   ): Promise<ApiResponse<{ keyVersion: number }>> {
-    return this.request(`/api/rooms/${roomId}/rotate-key`, {
+    return this.request(`/api/rooms/${roomId}/key`, {
       method: 'POST',
       body: JSON.stringify({ encryptedKeys }),
-    });
-  }
-
-  async deleteGroup(roomId: string): Promise<ApiResponse<void>> {
-    return this.request(`/api/rooms/${roomId}/group`, {
-      method: 'DELETE',
     });
   }
 
@@ -400,7 +349,7 @@ class ApiService {
     const params = new URLSearchParams();
     if (limit) params.set('limit', limit.toString());
     if (before) params.set('before', before);
-    return this.request(`/api/messages/${roomId}?${params}`);
+    return this.request(`/api/rooms/${roomId}/messages?${params}`);
   }
 
   async sendMessage(
@@ -410,10 +359,9 @@ class ApiService {
     authTag: string,
     type: string = 'text',
     mediaUrl?: string,
-    mediaType?: string,
-    keyVersion?: number
-  ): Promise<ApiResponse<{ message: Message }>> {
-    return this.request(`/api/messages/${roomId}`, {
+    mediaType?: string
+  ): Promise<ApiResponse<Message>> {
+    return this.request(`/api/rooms/${roomId}/messages`, {
       method: 'POST',
       body: JSON.stringify({
         encryptedContent,
@@ -422,72 +370,51 @@ class ApiService {
         type,
         mediaUrl,
         mediaType,
-        keyVersion,
       }),
     });
   }
 
   async deleteMessage(roomId: string, messageId: string): Promise<ApiResponse<void>> {
-    return this.request(`/api/messages/${roomId}/${messageId}`, {
+    return this.request(`/api/rooms/${roomId}/messages/${messageId}`, {
       method: 'DELETE',
     });
   }
 
-  // Upload endpoints
-  async uploadFile(
-    file: File,
-    folder: string = 'messages'
-  ): Promise<ApiResponse<{
-    url: string;
-    key: string;
-    size: number;
-    mimeType: string;
-    originalName: string;
-  }>> {
-    const formData = new FormData();
-    formData.append('file', file);
-    formData.append('folder', folder);
-
-    const headers: HeadersInit = {};
-    if (this.accessToken) {
-      headers['Authorization'] = `Bearer ${this.accessToken}`;
-    }
-
-    try {
-      const response = await fetch(`${API_URL}/api/upload`, {
-        method: 'POST',
-        headers,
-        body: formData,
-      });
-      return response.json();
-    } catch (error) {
-      return {
-        success: false,
-        error: error instanceof Error ? error.message : 'Upload failed',
-      };
-    }
+  // Additional methods needed by hooks
+  async getRoomKeyVersion(
+    roomId: string,
+    version: number
+  ): Promise<ApiResponse<{ encryptedRoomKey: string; version: number }>> {
+    return this.request(`/api/rooms/${roomId}/key?version=${version}`);
   }
 
-  async uploadBase64(
-    data: string,
-    filename: string,
-    mimeType: string,
-    folder: string = 'messages'
-  ): Promise<ApiResponse<{
-    url: string;
-    key: string;
-    size: number;
-    mimeType: string;
-    originalName: string;
+  async getUserPublicKey(userId: string): Promise<ApiResponse<{ publicKey: string }>> {
+    const response = await this.request<{ publicKey: string }>(`/api/users/${userId}`);
+    if (response.success && response.data) {
+      return { success: true, data: { publicKey: (response.data as any).publicKey } };
+    }
+    return response;
+  }
+
+  async getRoomKeyHistory(roomId: string): Promise<ApiResponse<{
+    keyHistory: Array<{ version: number; encryptedRoomKey: string }>;
+    currentVersion: number;
   }>> {
-    return this.request('/api/upload/base64', {
-      method: 'POST',
-      body: JSON.stringify({ data, filename, mimeType, folder }),
+    return this.request(`/api/rooms/${roomId}/key-history`);
+  }
+
+  async updateGroup(
+    roomId: string,
+    data: { name?: string; photoUrl?: string | null }
+  ): Promise<ApiResponse<Room>> {
+    return this.request(`/api/rooms/${roomId}`, {
+      method: 'PATCH',
+      body: JSON.stringify(data),
     });
   }
 
-  async deleteFile(key: string): Promise<ApiResponse<void>> {
-    return this.request(`/api/upload/${encodeURIComponent(key)}`, {
+  async deleteGroup(roomId: string): Promise<ApiResponse<void>> {
+    return this.request(`/api/rooms/${roomId}`, {
       method: 'DELETE',
     });
   }

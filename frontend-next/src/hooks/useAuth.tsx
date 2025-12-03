@@ -71,7 +71,8 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
         }
 
         // Try to restore private key from IndexedDB
-        const keyRestored = await keyManager.tryRestoreFromIndexedDB(response.data.user.id);
+        const userData = response.data;
+        const keyRestored = await keyManager.tryRestoreFromIndexedDB(userData.id);
 
         if (!keyRestored) {
           // No private key in IndexedDB - user needs to re-login
@@ -82,7 +83,7 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
         }
 
         // Session restored successfully
-        setUser(response.data.user);
+        setUser(userData);
         setTokens(storedTokens);
         setIsAuthenticated(true);
 
@@ -185,9 +186,9 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
     async (data: { name?: string; photoUrl?: string | null }) => {
       if (!user) return;
 
-      const response = await api.updateUser(user.id, data);
+      const response = await api.updateUser(data);
       if (response.success && response.data) {
-        setUser(response.data.user);
+        setUser(response.data);
       }
     },
     [user]

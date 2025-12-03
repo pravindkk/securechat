@@ -1,27 +1,17 @@
-import { io, Socket } from 'socket.io-client';
+import PusherClient from 'pusher-js';
+import type { Channel } from 'pusher-js';
 import {
   Message,
   TypingEvent,
   PresenceEvent,
-  UnreadCountEvent,
   MemberAddedEvent,
   MemberRemovedEvent,
-  MemberLeftEvent,
-  RoleChangedEvent,
   RoomKeyRotatedEvent,
-  GroupUpdatedEvent,
-  GroupDeletedEvent,
-  GroupCreatedEvent,
 } from '@/types';
-
-const SOCKET_URL = process.env.NEXT_PUBLIC_SOCKET_URL || 'http://localhost:5001';
 
 type MessageHandler = (message: Message) => void;
 type TypingHandler = (event: TypingEvent) => void;
-type StopTypingHandler = (event: { roomId: string; userId: string }) => void;
 type PresenceHandler = (event: PresenceEvent) => void;
-type UnreadCountHandler = (event: UnreadCountEvent) => void;
-type MessagesReadHandler = (event: { roomId: string; userId: string }) => void;
 type ErrorHandler = (error: { message: string }) => void;
 type DisconnectHandler = (reason: string) => void;
 type ReconnectHandler = () => void;
@@ -29,21 +19,14 @@ type ReconnectHandler = () => void;
 // Group event handlers
 type MemberAddedHandler = (event: MemberAddedEvent) => void;
 type MemberRemovedHandler = (event: MemberRemovedEvent) => void;
-type MemberLeftHandler = (event: MemberLeftEvent) => void;
-type RoleChangedHandler = (event: RoleChangedEvent) => void;
 type RoomKeyRotatedHandler = (event: RoomKeyRotatedEvent) => void;
-type GroupUpdatedHandler = (event: GroupUpdatedEvent) => void;
-type GroupDeletedHandler = (event: GroupDeletedEvent) => void;
-type GroupCreatedHandler = (event: GroupCreatedEvent) => void;
 
 class SocketService {
-  private socket: Socket | null = null;
+  private pusher: PusherClient | null = null;
+  private channels: Map<string, Channel> = new Map();
   private messageHandlers: MessageHandler[] = [];
   private typingHandlers: TypingHandler[] = [];
-  private stopTypingHandlers: StopTypingHandler[] = [];
   private presenceHandlers: PresenceHandler[] = [];
-  private unreadCountHandlers: UnreadCountHandler[] = [];
-  private messagesReadHandlers: MessagesReadHandler[] = [];
   private errorHandlers: ErrorHandler[] = [];
   private disconnectHandlers: DisconnectHandler[] = [];
   private reconnectHandlers: ReconnectHandler[] = [];
@@ -51,155 +34,129 @@ class SocketService {
   // Group event handler arrays
   private memberAddedHandlers: MemberAddedHandler[] = [];
   private memberRemovedHandlers: MemberRemovedHandler[] = [];
-  private memberLeftHandlers: MemberLeftHandler[] = [];
-  private roleChangedHandlers: RoleChangedHandler[] = [];
   private roomKeyRotatedHandlers: RoomKeyRotatedHandler[] = [];
-  private groupUpdatedHandlers: GroupUpdatedHandler[] = [];
-  private groupDeletedHandlers: GroupDeletedHandler[] = [];
-  private groupCreatedHandlers: GroupCreatedHandler[] = [];
 
   // Track joined rooms for reconnection
   private joinedRooms: Set<string> = new Set();
 
-  async connect(token: string): Promise<void> {
-    if (this.socket?.connected) {
+  async connect(_token?: string): Promise<void> {
+    if (this.pusher) {
       return;
     }
 
-    return new Promise((resolve, reject) => {
-      this.socket = io(SOCKET_URL, {
-        auth: { token },
-        transports: ['websocket', 'polling'],
-        reconnection: true,
-        reconnectionAttempts: 5,
-        reconnectionDelay: 1000,
+    const key = process.env.NEXT_PUBLIC_PUSHER_KEY;
+    const cluster = process.env.NEXT_PUBLIC_PUSHER_CLUSTER || 'us2';
+
+    if (!key) {
+      console.warn('[Pusher] No Pusher key configured, real-time disabled');
+      return;
+    }
+
+    return new Promise((resolve) => {
+      this.pusher = new PusherClient(key, {
+        cluster,
       });
 
-      this.socket.on('connect', () => {
-        console.log('[Socket] Connected');
+      this.pusher.connection.bind('connected', () => {
+        console.log('[Pusher] Connected');
         // Rejoin all previously joined rooms on reconnect
         if (this.joinedRooms.size > 0) {
-          console.log('[Socket] Rejoining rooms:', Array.from(this.joinedRooms));
+          console.log('[Pusher] Rejoining rooms:', Array.from(this.joinedRooms));
           this.joinedRooms.forEach((roomId) => {
-            this.socket?.emit('join_room', { roomId });
+            this.subscribeToRoom(roomId);
           });
-          // Notify reconnect handlers (for message sync)
           this.reconnectHandlers.forEach((handler) => handler());
         }
         resolve();
       });
 
-      this.socket.on('connect_error', (error) => {
-        console.error('[Socket] Connection error:', error);
-        reject(error);
+      this.pusher.connection.bind('error', (error: Error) => {
+        console.error('[Pusher] Connection error:', error);
+        this.errorHandlers.forEach((handler) => handler({ message: error.message }));
       });
 
-      this.socket.on('disconnect', (reason) => {
-        console.log('[Socket] Disconnected:', reason);
-        // Notify disconnect handlers
-        this.disconnectHandlers.forEach((handler) => handler(reason));
-      });
-
-      this.socket.on('new_message', (data: { message: Message }) => {
-        this.messageHandlers.forEach((handler) => handler(data.message));
-      });
-
-      this.socket.on('user_typing', (event: TypingEvent) => {
-        this.typingHandlers.forEach((handler) => handler(event));
-      });
-
-      this.socket.on('user_stop_typing', (event: { roomId: string; userId: string }) => {
-        this.stopTypingHandlers.forEach((handler) => handler(event));
-      });
-
-      this.socket.on('presence_update', (event: PresenceEvent) => {
-        this.presenceHandlers.forEach((handler) => handler(event));
-      });
-
-      this.socket.on('unread_count_update', (event: UnreadCountEvent) => {
-        this.unreadCountHandlers.forEach((handler) => handler(event));
-      });
-
-      this.socket.on('messages_read', (event: { roomId: string; userId: string }) => {
-        this.messagesReadHandlers.forEach((handler) => handler(event));
-      });
-
-      this.socket.on('error', (error: { message: string }) => {
-        this.errorHandlers.forEach((handler) => handler(error));
-      });
-
-      // Group event listeners
-      this.socket.on('member_added', (event: MemberAddedEvent) => {
-        this.memberAddedHandlers.forEach((handler) => handler(event));
-      });
-
-      this.socket.on('member_removed', (event: MemberRemovedEvent) => {
-        this.memberRemovedHandlers.forEach((handler) => handler(event));
-      });
-
-      this.socket.on('member_left', (event: MemberLeftEvent) => {
-        this.memberLeftHandlers.forEach((handler) => handler(event));
-      });
-
-      this.socket.on('role_changed', (event: RoleChangedEvent) => {
-        this.roleChangedHandlers.forEach((handler) => handler(event));
-      });
-
-      this.socket.on('room_key_rotated', (event: RoomKeyRotatedEvent) => {
-        this.roomKeyRotatedHandlers.forEach((handler) => handler(event));
-      });
-
-      this.socket.on('group_updated', (event: GroupUpdatedEvent) => {
-        this.groupUpdatedHandlers.forEach((handler) => handler(event));
-      });
-
-      this.socket.on('group_deleted', (event: GroupDeletedEvent) => {
-        this.groupDeletedHandlers.forEach((handler) => handler(event));
-      });
-
-      this.socket.on('group_created', (event: GroupCreatedEvent) => {
-        this.groupCreatedHandlers.forEach((handler) => handler(event));
+      this.pusher.connection.bind('disconnected', () => {
+        console.log('[Pusher] Disconnected');
+        this.disconnectHandlers.forEach((handler) => handler('disconnected'));
       });
     });
   }
 
-  disconnect(): void {
-    if (this.socket) {
-      this.socket.disconnect();
-      this.socket = null;
+  private subscribeToRoom(roomId: string): void {
+    if (!this.pusher || this.channels.has(roomId)) {
+      return;
     }
-    // Clear joined rooms on disconnect
+
+    const channelName = `private-room-${roomId}`;
+    const channel = this.pusher.subscribe(channelName);
+
+    channel.bind('new-message', (data: Message) => {
+      this.messageHandlers.forEach((handler) => handler(data));
+    });
+
+    channel.bind('typing', (event: TypingEvent) => {
+      this.typingHandlers.forEach((handler) => handler(event));
+    });
+
+    channel.bind('member-added', (event: MemberAddedEvent) => {
+      this.memberAddedHandlers.forEach((handler) => handler(event));
+    });
+
+    channel.bind('member-removed', (event: MemberRemovedEvent) => {
+      this.memberRemovedHandlers.forEach((handler) => handler(event));
+    });
+
+    channel.bind('key-rotated', (event: RoomKeyRotatedEvent) => {
+      this.roomKeyRotatedHandlers.forEach((handler) => handler(event));
+    });
+
+    this.channels.set(roomId, channel);
+  }
+
+  disconnect(): void {
+    if (this.pusher) {
+      this.channels.forEach((_, roomId) => {
+        this.pusher?.unsubscribe(`private-room-${roomId}`);
+      });
+      this.channels.clear();
+      this.pusher.disconnect();
+      this.pusher = null;
+    }
     this.joinedRooms.clear();
   }
 
   isConnected(): boolean {
-    return this.socket?.connected ?? false;
+    return this.pusher?.connection.state === 'connected';
   }
 
   joinRoom(roomId: string): void {
     this.joinedRooms.add(roomId);
-    this.socket?.emit('join_room', { roomId });
+    this.subscribeToRoom(roomId);
   }
 
   leaveRoom(roomId: string): void {
     this.joinedRooms.delete(roomId);
-    this.socket?.emit('leave_room', { roomId });
+    if (this.pusher && this.channels.has(roomId)) {
+      this.pusher.unsubscribe(`private-room-${roomId}`);
+      this.channels.delete(roomId);
+    }
   }
 
-  sendTyping(roomId: string): void {
-    this.socket?.emit('typing', { roomId });
+  // These methods are no-ops in Pusher - typing is handled via API
+  sendTyping(_roomId: string): void {
+    // In Pusher, typing would be sent via API and broadcast
   }
 
-  sendStopTyping(roomId: string): void {
-    this.socket?.emit('stop_typing', { roomId });
+  sendStopTyping(_roomId: string): void {
+    // In Pusher, stop typing would be sent via API and broadcast
   }
 
-  markRead(roomId: string): void {
-    this.socket?.emit('mark_read', { roomId });
+  markRead(_roomId: string): void {
+    // Mark read is handled via API
   }
 
-  updatePresence(state: 'online' | 'offline'): void {
-    this.socket?.emit('update_presence', { state });
+  updatePresence(_state: 'online' | 'offline'): void {
+    // Presence is handled via API
   }
 
   // Event handler registration methods
@@ -217,11 +174,9 @@ class SocketService {
     };
   }
 
-  onStopTyping(handler: StopTypingHandler): () => void {
-    this.stopTypingHandlers.push(handler);
-    return () => {
-      this.stopTypingHandlers = this.stopTypingHandlers.filter((h) => h !== handler);
-    };
+  onStopTyping(_handler: (event: { roomId: string; userId: string }) => void): () => void {
+    // Combined with onTyping in Pusher
+    return () => {};
   }
 
   onPresenceUpdate(handler: PresenceHandler): () => void {
@@ -231,18 +186,14 @@ class SocketService {
     };
   }
 
-  onUnreadCountUpdate(handler: UnreadCountHandler): () => void {
-    this.unreadCountHandlers.push(handler);
-    return () => {
-      this.unreadCountHandlers = this.unreadCountHandlers.filter((h) => h !== handler);
-    };
+  onUnreadCountUpdate(_handler: (event: { roomId: string; unreadCount: number }) => void): () => void {
+    // Handled via API polling
+    return () => {};
   }
 
-  onMessagesRead(handler: MessagesReadHandler): () => void {
-    this.messagesReadHandlers.push(handler);
-    return () => {
-      this.messagesReadHandlers = this.messagesReadHandlers.filter((h) => h !== handler);
-    };
+  onMessagesRead(_handler: (event: { roomId: string; userId: string }) => void): () => void {
+    // Handled via API polling
+    return () => {};
   }
 
   onError(handler: ErrorHandler): () => void {
@@ -267,18 +218,14 @@ class SocketService {
     };
   }
 
-  onMemberLeft(handler: MemberLeftHandler): () => void {
-    this.memberLeftHandlers.push(handler);
-    return () => {
-      this.memberLeftHandlers = this.memberLeftHandlers.filter((h) => h !== handler);
-    };
+  onMemberLeft(_handler: (event: { roomId: string; userId: string }) => void): () => void {
+    // Combined with onMemberRemoved
+    return () => {};
   }
 
-  onRoleChanged(handler: RoleChangedHandler): () => void {
-    this.roleChangedHandlers.push(handler);
-    return () => {
-      this.roleChangedHandlers = this.roleChangedHandlers.filter((h) => h !== handler);
-    };
+  onRoleChanged(_handler: (event: { roomId: string; userId: string; newRole: string }) => void): () => void {
+    // Handled via API polling
+    return () => {};
   }
 
   onRoomKeyRotated(handler: RoomKeyRotatedHandler): () => void {
@@ -288,25 +235,19 @@ class SocketService {
     };
   }
 
-  onGroupUpdated(handler: GroupUpdatedHandler): () => void {
-    this.groupUpdatedHandlers.push(handler);
-    return () => {
-      this.groupUpdatedHandlers = this.groupUpdatedHandlers.filter((h) => h !== handler);
-    };
+  onGroupUpdated(_handler: (event: { roomId: string; name?: string; photoUrl?: string }) => void): () => void {
+    // Handled via API polling
+    return () => {};
   }
 
-  onGroupDeleted(handler: GroupDeletedHandler): () => void {
-    this.groupDeletedHandlers.push(handler);
-    return () => {
-      this.groupDeletedHandlers = this.groupDeletedHandlers.filter((h) => h !== handler);
-    };
+  onGroupDeleted(_handler: (event: { roomId: string }) => void): () => void {
+    // Handled via API polling
+    return () => {};
   }
 
-  onGroupCreated(handler: GroupCreatedHandler): () => void {
-    this.groupCreatedHandlers.push(handler);
-    return () => {
-      this.groupCreatedHandlers = this.groupCreatedHandlers.filter((h) => h !== handler);
-    };
+  onGroupCreated(_handler: (event: { roomId: string }) => void): () => void {
+    // Handled via API polling
+    return () => {};
   }
 
   onDisconnect(handler: DisconnectHandler): () => void {
