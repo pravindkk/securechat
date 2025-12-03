@@ -87,8 +87,8 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
         setTokens(storedTokens);
         setIsAuthenticated(true);
 
-        // Connect to socket
-        await socketService.connect(storedTokens.accessToken);
+        // Connect to socket with userId for room subscriptions
+        await socketService.connect(storedTokens.accessToken, userData.id);
       } catch (error) {
         console.error('Auth initialization failed:', error);
         await api.setTokens(null);
@@ -162,8 +162,8 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
     setTokens(userTokens);
     setIsAuthenticated(true);
 
-    // Connect to socket (now keys are initialized)
-    await socketService.connect(userTokens.accessToken);
+    // Connect to socket with userId for room subscriptions
+    await socketService.connect(userTokens.accessToken, userData.id);
   }, []);
 
   const logout = useCallback(async () => {

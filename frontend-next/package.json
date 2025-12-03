@@ -3,10 +3,12 @@
   "version": "3.0.0",
   "private": true,
   "scripts": {
-    "dev": "next dev -p 3001",
+    "dev": "node server.js",
+    "dev:next": "next dev -p 3001",
     "build": "next build",
     "build:full": "prisma generate && next build",
-    "start": "next start -p 3001",
+    "start": "NODE_ENV=production node server.js",
+    "start:next": "next start -p 3001",
     "lint": "next lint",
     "typecheck": "tsc --noEmit",
     "db:generate": "prisma generate",
@@ -26,10 +28,10 @@
     "jsonwebtoken": "^9.0.2",
     "mongoose": "^8.2.0",
     "next": "14.2.3",
-    "pusher": "^5.2.0",
-    "pusher-js": "^8.4.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
+    "socket.io": "^4.7.4",
+    "socket.io-client": "^4.7.4",
     "zod": "^3.22.4"
   },
   "devDependencies": {

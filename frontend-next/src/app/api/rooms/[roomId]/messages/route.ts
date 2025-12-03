@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { prisma, connectMongoDB } from '@/lib/db';
 import { requireAuth } from '@/lib/auth';
 import Message from '@/lib/models/Message';
-import { triggerRoomEvent, EVENTS } from '@/lib/pusher';
+import { emitToRoom, SOCKET_EVENTS } from '@/lib/socketEmit';
 
 // GET /api/rooms/[roomId]/messages - Get messages
 export async function GET(
@@ -153,12 +153,12 @@ export async function POST(
       sender,
     };
 
-    // Send real-time notification via Pusher
+    // Send real-time notification via Socket.IO
     try {
-      await triggerRoomEvent(roomId, EVENTS.NEW_MESSAGE, messageResponse);
-    } catch (pusherError) {
-      console.error('Pusher error:', pusherError);
-      // Don't fail the request if Pusher fails
+      emitToRoom(roomId, SOCKET_EVENTS.NEW_MESSAGE, messageResponse);
+    } catch (socketError) {
+      console.error('Socket emit error:', socketError);
+      // Don't fail the request if socket emit fails
     }
 
     return NextResponse.json(messageResponse);
