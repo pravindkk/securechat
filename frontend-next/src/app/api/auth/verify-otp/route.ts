@@ -154,11 +154,14 @@ export async function POST(request: NextRequest) {
     });
 
     return NextResponse.json({
-      user: sanitizeUser(user),
-      tokens,
-      isNewUser,
-      encryptedPrivateKey,
-      keyEncryptionSalt,
+      success: true,
+      data: {
+        user: sanitizeUser(user),
+        tokens,
+        isNewUser,
+        encryptedPrivateKey,
+        keyEncryptionSalt,
+      },
     });
   } catch (error) {
     console.error('Verify OTP error:', error);

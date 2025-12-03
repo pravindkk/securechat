@@ -77,8 +77,10 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json({
       success: true,
-      isNewUser: !existingUser,
-      derivationSalt,
+      data: {
+        isNewUser: !existingUser,
+        derivationSalt,
+      },
     });
   } catch (error) {
     console.error('Request OTP error:', error);
